@@ -221,11 +221,11 @@ Multipart body: a JSON description part plus file data. Requires `X-Csrf-Token`.
 
 **Not shipped in v1.** Design constraints for when it is — see [`03-mcp-tools.md`](03-mcp-tools.md) and [`07-risks-and-policy.md`](07-risks-and-policy.md): off unless `AVENUE_MCP_ENABLE_WRITES=1`, mandatory dry-run preview, explicit confirmation parameter.
 
-### 🔒 Submission comments — v2, gated
+### 🔒 Submission comments — no separate route
 
-The learner-side comment channel is the **comment field on the submission itself**, sent as part of the multipart submit body — not a separate endpoint. The standalone feedback-posting route (`POST .../feedback/...`) is **instructor-only** and out of reach.
+**Confirmed scope: there is no standalone learner comment endpoint.** The learner-side comment channel is the **comment field inside the multipart submit body** — it travels with the submission itself. The standalone feedback-posting route (`POST .../feedback/...`) is instructor-only and out of reach.
 
-This is a scope correction worth stating plainly: "make comments on assignments" as a student means *attaching a comment to your own submission*, not commenting on the assignment as an instructor would. If the goal was the latter, it isn't achievable on a student account by any route.
+Consequence for the tool layer: this is **not a separate tool.** It is an optional `comment` parameter on `submit_assignment` ([`03-mcp-tools.md`](03-mcp-tools.md)). A student cannot comment on an assignment without submitting to it, so a standalone comment tool would have nothing to call.
 
 ---
 
@@ -286,6 +286,86 @@ GET /d2l/api/le/{v}/{orgUnitId}/calendar/events/myEvents/
 Calendar events for the caller in a course, including assignment and quiz due dates. Accepts date-range parameters.
 
 This route is doing double duty: it's the primary source for a unified cross-course deadline view, *and* the insurance policy if the dropbox folder listing turns out to be instructor-only. Worth probing early.
+
+---
+
+## Quizzes
+
+Quiz deadlines are exactly as load-bearing as assignment deadlines, and a deadline tool that silently omits them is worse than one that has none — the user trusts it and misses a quiz.
+
+### List quizzes
+
+```
+GET /d2l/api/le/{v}/{orgUnitId}/quizzes/
+```
+
+**Status:** ⚠️ Uncertain — the quizzes API has historically been instructor-leaning.
+
+**Backs:** `list_quizzes`, and feeds `get_upcoming_deadlines`.
+
+Returns quiz definitions: name, due date, start/end availability window, attempts allowed.
+
+**Note the distinction between three dates** — `StartDate` (when it opens), `EndDate` (when it closes), and `DueDate` (when it's "due"). A quiz can be *submittable* after its due date but before its end date. Conflating them produces wrong urgency: telling a student a quiz is closed when it's merely late is as bad as the reverse.
+
+### My quiz attempts
+
+```
+GET /d2l/api/le/{v}/{orgUnitId}/quizzes/{quizId}/attempts/
+```
+
+**Status:** ⚠️ Uncertain — a learner reading their *own* attempts is the plausible legitimate case.
+
+**Backs:** `list_quizzes` (completion status).
+
+Attempt history: whether taken, when, and score where released.
+
+#### Fallback if quizzes are blocked
+
+Quiz due dates surface in `calendar/events/myEvents/`, same as assignments. `list_quizzes` would degrade to dates and titles without attempt status — and `get_upcoming_deadlines` keeps working either way, since it reads the calendar. That's the reason the calendar route is worth probing first: it's the fallback for *two* separate features.
+
+**Explicitly out of scope: quiz questions and answers.** Even if a route exposed them, retrieving live quiz content is squarely on the wrong side of the line in [`07-risks-and-policy.md`](07-risks-and-policy.md). This server reads quiz *metadata* — names, dates, whether you've taken it. Not contents.
+
+---
+
+## Discussions
+
+The most valuable addition to the RAG corpus, and the one most likely to be overlooked. Forum threads are frequently the **only** place a clarification exists — an instructor answering "does Q3 want the recursive version?" in a reply is not in the outline, not in the slides, and not in any announcement.
+
+### List forums
+
+```
+GET /d2l/api/le/{v}/{orgUnitId}/discussions/forums/
+```
+
+**Status:** 🔵 Expected — students participate in discussions, so read access is very likely.
+
+**Backs:** `list_discussions`.
+
+### List topics in a forum
+
+```
+GET /d2l/api/le/{v}/{orgUnitId}/discussions/forums/{forumId}/topics/
+```
+
+**Status:** 🔵 Expected. **Backs:** `list_discussions`.
+
+### Posts in a topic
+
+```
+GET /d2l/api/le/{v}/{orgUnitId}/discussions/forums/{forumId}/topics/{topicId}/posts/
+```
+
+**Status:** 🔵 Expected. **Backs:** `read_discussion_thread`, and the RAG indexer.
+
+Returns thread posts with author, timestamp, HTML body, and parent-post ID for threading.
+
+Notes:
+- **Paged**, and popular threads get long. Cap and page properly.
+- Bodies are HTML — same treatment as announcements.
+- `ParentPostId` reconstructs the reply tree. Flattening it loses the question→answer pairing, which is the whole value.
+- **Author names are other students' personal information.** Indexed post text should retain authorship only as a role hint (instructor vs. student — instructor replies are higher-signal), not as a durable name-to-content record. See [`07-risks-and-policy.md`](07-risks-and-policy.md).
+
+**Not shipped: posting to discussions.** `POST` routes exist and are learner-accessible. They are deliberately out of scope — posting in a student's name to a space their classmates read is a higher-consequence write than submitting an assignment, and there's no version of it this server should do.
 
 ---
 
@@ -378,7 +458,30 @@ The `403` vs `401` distinction is load-bearing: `403` on a healthy session is a 
 | Grade structure | `GET /le/{v}/{id}/grades/` | ⚠️ | `analyze_grade_summary` |
 | Announcements | `GET /le/{v}/{id}/news/` | 🔵 | `list_announcements` |
 | My calendar | `GET /le/{v}/{id}/calendar/events/myEvents/` | 🔵 | `get_upcoming_deadlines` |
+| Quizzes | `GET /le/{v}/{id}/quizzes/` | ⚠️ | `list_quizzes` |
+| My quiz attempts | `GET /le/{v}/{id}/quizzes/{q}/attempts/` | ⚠️ | `list_quizzes` |
+| Discussion forums | `GET /le/{v}/{id}/discussions/forums/` | 🔵 | `list_discussions` |
+| Forum topics | `GET /le/{v}/{id}/discussions/forums/{f}/topics/` | 🔵 | `list_discussions` |
+| Thread posts | `GET /le/{v}/{id}/discussions/forums/{f}/topics/{t}/posts/` | 🔵 | `read_discussion_thread` |
 | Class list | `GET /lp/{v}/{id}/classlist/` | ⚠️ | `get_class_list` |
 | Submit work | `POST /le/{v}/{id}/dropbox/folders/{f}/submissions/mysubmissions/` | 🔒 | v2 |
 
-**Four ⚠️ rows and they are not evenly important.** The dropbox folder listing is the one to probe first — it gates the assignments feature entirely. The class list is the one most likely to be blocked, and the one where being blocked matters least.
+**Six ⚠️ rows, unevenly important.** Priority order for Phase 0:
+
+1. **`dropbox/folders/`** — gates the assignments feature entirely.
+2. **`calendar/events/myEvents/`** — not ⚠️, but probe it early anyway: it's the fallback for *both* assignments and quizzes, so if it's missing due dates, two features lose their safety net at once.
+3. **`grades/`** — gates grade projection.
+4. **`quizzes/`** — gates quiz status; deadlines survive via the calendar regardless.
+5. **`classlist/`** — most likely blocked, matters least.
+
+## Routes deliberately not used
+
+Reachable, and excluded on purpose. Recorded here so the omissions read as decisions rather than oversights.
+
+| Route | Why not |
+|---|---|
+| `POST .../discussions/.../posts/` | Posting in the user's name to a space classmates read. Higher consequence than submitting; no good version of it. |
+| Quiz question/answer routes | Retrieving live quiz content is on the wrong side of the integrity line. Metadata only. |
+| `POST .../feedback/...` | Instructor-only, and not a thing a student should be doing. |
+| Any org-structure / user-management route | Out of scope; a student has no business there. |
+| Locker / ePortfolio | No use case here. |

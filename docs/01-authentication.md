@@ -2,6 +2,21 @@
 
 This is the load-bearing document. If auth doesn't work, nothing else does.
 
+> ## Verified against the live instance (2026-08-05)
+>
+> Three assumptions in the original draft were wrong. All are corrected below and
+> pinned by tests in `tests/test_live_findings.py`; full detail in
+> [`08-api-probe-results.md`](08-api-probe-results.md).
+>
+> | Assumption | Reality |
+> |---|---|
+> | Brightspace is at `avenue.mcmaster.ca` | **No.** That is a static Apache landing page; `/d2l/*` 404s. Brightspace is **`avenue.cllmcmaster.ca`** (lp 1.62, le 1.96). |
+> | `/d2l/lp/auth/xsrf-tokens` can serve as the liveness probe | **No.** It returns 200 + JSON with **no session at all**. Liveness is now `/d2l/api/lp/1.0/users/whoami`, requiring 200 **and** a JSON object. |
+> | A `403` means "authenticated but not permitted" | **Only when the body is JSON.** Anonymous API calls return **403 + HTML** — the sign-in wall. That now maps to `SessionExpiredError`. |
+>
+> The SSO chain is also confirmed: **SAML 2.0** to Microsoft Entra, tenant
+> `44376307-b429-42ad-8c25-28cd496f4772`, spanning three hosts.
+
 ## Why the official path is closed
 
 D2L's supported way to call Valence is **OAuth 2.0**. There are two grant types:
@@ -16,6 +31,35 @@ A student account has no access to Manage Extensibility. There is no self-servic
 There is also a legacy path (the Keytool service, issuing App ID/Key pairs), and it has the same gate — keys are distributed only to registered third parties and to D2L's own installations.
 
 **Conclusion:** OAuth is unavailable to us today. It remains the right long-term answer, and asking UTS about Valence API access is a reasonable thing to do — see [`07-risks-and-policy.md`](07-risks-and-policy.md). The architecture leaves a slot for it.
+
+### The LTI path is closed for the same reason
+
+D2L's other sanctioned integration route is **LTI 1.3** — the standard by which external tools get launched from inside a course. It has the identical blocker: the institution must register the tool in Brightspace, exchanging a client ID, a deployment ID, and a JWKS endpoint. Same admin gate, different acronym.
+
+### "Sign in with MacID" does not produce an Avenue session
+
+This deserves its own heading because it is an appealing idea that does not work, and the failure isn't obvious until you've built it.
+
+McMaster's MacID sign-in is Microsoft Entra ID. So a natural thought is: register an app with Entra, run an OAuth flow, get a token, use it against Avenue.
+
+**Entra tokens are scoped to the application that requested them.** A token minted for your app carries your app's audience claim. Brightspace will not accept it — it has no trust relationship with your app registration, and no endpoint that exchanges a third-party IdP token for a Brightspace session. Session cookies are minted by *Brightspace*, after Brightspace itself completes a SAML/OIDC handshake with McMaster's IdP as the relying party. You cannot insert yourself into that handshake from outside it.
+
+Concretely:
+
+```
+✗  user → your app → Entra OAuth → access token → ??? → Avenue
+      no exchange exists at the "???" step
+
+✓  user → browser → avenue.mcmaster.ca
+        → redirect to Microsoft (MacID + MFA)
+        → redirect back to Avenue
+        → Avenue sets d2lSessionVal / d2lSecureSessionVal
+        → we keep those cookies
+```
+
+The distinction is **the redirect target**. In the working flow the handshake completes *with Avenue*, and we observe the result. In the broken flow it completes with us, and we hold a credential Avenue has never heard of.
+
+From the user's point of view the two are indistinguishable — they click a button, sign in with their MacID Microsoft account, approve MFA, and land back working. That UX is exactly what the login flow below delivers. What we cannot do is skip the browser and own the token exchange ourselves.
 
 ## The path that works: session authentication
 
@@ -78,6 +122,10 @@ Not theoretical. Three independent D2L MCP servers ship on this mechanism:
 
 D2L publishes `Brightspace/superagent-d2l-session-auth`, a first-party plugin whose entire job is attaching D2L session auth headers to requests — the mechanism is one D2L builds on itself.
 
+**Use one of these as a Phase 0 shortcut.** Before writing our own probe, install `RohanMuppa/brightspace-mcp-server` (it advertises MFA support and "works with any school") and point it at `avenue.mcmaster.ca`. If it lists your courses, the entire auth premise above is validated in twenty minutes rather than half a day. If it fails, *how* it fails tells us what McMaster's Entra chain does to browser automation — which is precisely what our login flow has to handle.
+
+Two things it will not do for us: it's read-only, and it has no semantic search over course files. It's a de-risking instrument, not a substitute. See [`06-roadmap.md`](06-roadmap.md) Phase 0.
+
 ## Login flow
 
 McMaster SSO involves a MacID, a password, and multi-factor authentication. MFA means **fully headless credential-stuffing is not a design goal** — it's fragile and it means storing a password. Instead:
@@ -116,6 +164,8 @@ The browser is used **only** to acquire a session. Once we have cookies, all rea
 | `is_alive()` | Probe `/d2l/lp/auth/xsrf-tokens`; also refreshes the cached token |
 | `xsrf_token()` | Return current token, fetching if absent |
 | `require_session()` | `load()` → `is_alive()` → raise a typed `SessionExpiredError` if dead |
+| `status()` | Session present? age? last successful call? — backs the `get_status` tool ([`03`](03-mcp-tools.md)) |
+| `start_keepalive()` / `stop_keepalive()` | Scoped session extension; see Keepalive below |
 
 `require_session()` **never silently launches a browser.** An MCP server runs headless under a client; popping a browser window mid-tool-call is hostile and can hang the call. Instead the tool fails with a clear, actionable message and the user re-runs the login command deliberately. See the error contract below.
 
@@ -132,6 +182,24 @@ Observed behavior in comparable D2L deployments:
 McMaster's exact values are unknown and are a **Phase 0 measurement** — record them in [`08-api-probe-results.md`](08-api-probe-results.md).
 
 Practical consequence: expect to re-login roughly once a day. Design for that being a smooth, one-command operation rather than a crisis.
+
+### Keepalive — extending a session in active use
+
+Daily re-login is the friction most likely to make this tool unpleasant enough to abandon. Brightspace sessions, like most session-based apps, extend their idle timer on activity. So a cheap periodic request can keep a session alive well past its idle window.
+
+This sits in tension with the no-background-requests commitment in [`07-risks-and-policy.md`](07-risks-and-policy.md), and the resolution has to be deliberate rather than accidental:
+
+| Rule | Value |
+|---|---|
+| Keepalive runs | **Only while the server process is up and has served at least one tool call** |
+| Never runs | Before first use; after an idle period; when no session exists |
+| Request used | `GET /d2l/lp/auth/xsrf-tokens` — the same liveness probe, no extra surface |
+| Interval | ~30 min (config: `AVENUE_MCP_KEEPALIVE_MINUTES`, `0` disables) |
+| Idle shutoff | Stops after `AVENUE_MCP_KEEPALIVE_IDLE_STOP` minutes with no tool calls (default 120) |
+
+The distinction that keeps this honest: **this is not polling for data.** It sends no queries, fetches no course content, and stops on its own when you walk away. It's one lightweight request every half hour during a working session — materially less traffic than leaving an Avenue tab open in a browser, which does the same thing automatically.
+
+It is also **off by default in v1** (`AVENUE_MCP_KEEPALIVE_MINUTES=0`) until Phase 0 confirms that (a) sessions do in fact extend on activity, and (b) the idle window is short enough for this to be worth doing. Both are measurements, not assumptions — record them in [`08-api-probe-results.md`](08-api-probe-results.md).
 
 ### Detecting expiry
 
@@ -211,3 +279,6 @@ Record answers in [`08-api-probe-results.md`](08-api-probe-results.md).
 4. Does an expired session return `401`, a `302`, or an HTML `200`?
 5. Does McMaster's SSO land on Avenue directly, or bounce through an intermediate portal that the login-success wait must account for?
 6. Is a browser-like `User-Agent` required, or do requests succeed with the default `httpx` one?
+7. **Does activity extend the session's idle timer?** Gates whether keepalive is worth enabling at all.
+8. **Is there an absolute session cap that activity cannot extend?** If so, keepalive buys hours, not days, and the docs should say which.
+9. Does `RohanMuppa/brightspace-mcp-server` successfully authenticate against Avenue? (The twenty-minute validation above.)
