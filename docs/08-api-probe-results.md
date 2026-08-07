@@ -71,6 +71,18 @@ Both implementations of `get_class_list` were written for the blocked case and w
 
 `get_class_list` now returns course staff in full, `students: []`, and a `student_count`, with a note explaining the omission so an empty array is never read as "no classmates found". This is a deliberate policy choice, pinned by tests, and consistent with `docs/07`'s statement that the tool "is designed to return instructor contacts".
 
+### Session lifetime: ~6.8 hours, not ~24
+
+| Event | Time |
+|---|---|
+| Login | 09:29 |
+| Live API calls served | 09:29 - ~11:00 |
+| `alive=False` | age **409 min** (~6.8 h) |
+
+The plan assumed a ~24 h idle window and "re-login roughly once a day". The real figure is about a third of that, so **expect to sign in about twice in a working day**. Activity across the span did not visibly extend it.
+
+Open: whether 409 min is an idle timeout that sustained activity *would* extend, or a hard absolute cap. The bursts were sparse, so this run cannot distinguish them — and the two imply different keepalive designs (`AVENUE_MCP_KEEPALIVE_MINUTES`, still 0 by default).
+
 ### Field-shape findings (only visible with real data)
 
 **`classlist` reports roles in `ClasslistRoleDisplayName`.** Not `Role`, `RoleName`, `RoleDisplayName`, or `RoleAlias` — none of which are present. Observed: `Instructor` ×1, `TA 1` ×10, `Student` ×134 (`RoleId` 104/106/105). With that field missing from the lookup, every entry normalized to `Unknown`, all 145 landed in `students`, `instructors` came back empty — and the empty-instructors branch then fired the enrollments fallback, whose 403 overwrote the note with "the class list is not available" about a route that had just returned 145 rows. One missing key produced a wrong answer *and* a wrong explanation for it.

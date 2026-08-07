@@ -200,17 +200,19 @@ The browser is used **only** to acquire a session. Once we have cookies, all rea
 
 ## Session lifetime
 
-Observed behavior in comparable D2L deployments:
+**Measured on `avenue.cllmcmaster.ca`, 2026-08-07:**
 
-| Thing | Rough lifetime |
-|---|---|
-| Auth/XSRF token | ~1 hour |
-| Browser session (idle) | ~24 hours |
-| Absolute session cap | Institution-configured; assume shorter than you'd like |
+| Thing | Comparable D2L deployments | **McMaster, measured** |
+|---|---|---|
+| Auth/XSRF token | ~1 hour | not separately measured (cookies are the credential) |
+| Browser session | ~24 hours idle | **dead by 409 minutes (~6.8 h)** |
+| Absolute cap | institution-configured | ≤ ~6.8 h |
 
-McMaster's exact values are unknown and are a **Phase 0 measurement** — record them in [`08-api-probe-results.md`](08-api-probe-results.md).
+The session was created at 09:29 and reported `alive=False` at age 409 min, having served several bursts of API calls in between. So **the real figure is roughly a third of the ~24 h the plan assumed**, and activity did not visibly extend it across that span.
 
-Practical consequence: expect to re-login roughly once a day. Design for that being a smooth, one-command operation rather than a crisis.
+Practical consequence: **expect to re-login about twice in a working day**, not once. That is materially more friction than "roughly daily", and it is the strongest argument yet for the keepalive below — the idle window is short enough for a cheap periodic request to be worth it, which was the open question gating it.
+
+Not yet pinned down, and worth a second measurement: whether 409 min is an idle timeout that activity *would* have extended (the bursts were sparse), or a hard absolute cap that nothing extends. The two imply different keepalive designs.
 
 ### Keepalive — extending a session in active use
 
