@@ -39,6 +39,9 @@ CAPABILITY_KEYS: tuple[str, ...] = (
     "calendar_myevents",
     "quizzes",
     "quiz_attempts",
+    "discussion_forums",
+    "discussion_topics",
+    "discussion_posts",
     "classlist",
     "orgunit_users",
 )
@@ -100,6 +103,11 @@ MCMASTER = Institution(
         "calendar_myevents": "permitted",
         "quizzes": "permitted",
         "quiz_attempts": "denied",
+        "discussion_forums": "permitted",
+        # discussion_topics and discussion_posts are deliberately ABSENT, i.e.
+        # unverified. The probed McMaster course's forums came back empty, so
+        # nothing below the forum list was ever reached (docs/08). Carleton
+        # verified them; McMaster has not. Do not borrow that result backwards.
         # Predicted 403 in docs/02, measured readable. get_class_list withholds
         # the roster on FIPPA grounds regardless -- see tools/classlist.py.
         "classlist": "permitted",
@@ -141,6 +149,12 @@ CARLETON = Institution(
         "calendar_myevents": "permitted",
         "quizzes": "permitted",
         "quiz_attempts": "denied",
+        "discussion_forums": "permitted",
+        "discussion_topics": "permitted",
+        # Verified on a course with live threads. Posts carry Message.Html and
+        # ParentPostId, so question+reply chunking works -- but NO role field, so
+        # author_role is resolved from the roster. See client/roles.py, docs/09.
+        "discussion_posts": "permitted",
         # Returns a full roster including Email and OrgDefinedId -- more than
         # McMaster exposes. get_class_list withholds it on FIPPA grounds anyway.
         "classlist": "permitted",

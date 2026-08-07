@@ -103,9 +103,16 @@ class TestCapabilities:
 
     def test_unknown_key_defaults_to_unverified(self):
         assert MCMASTER.capability("some_future_route") == "unverified"
-        # discussion_posts was never reached at Carleton -- the probed course had
-        # forums but no topics -- so it must NOT read as permitted.
-        assert CARLETON.capability("discussion_posts") == "unverified"
+
+    def test_discussion_depth_differs_by_what_was_reached(self):
+        # Carleton was probed on a course with live threads. McMaster's probed
+        # course had EMPTY forums, so nothing below the forum list was ever
+        # reached there (docs/08). Verification coverage is per-instance, and
+        # Carleton's result must not be borrowed backwards.
+        assert CARLETON.capability("discussion_posts") == "permitted"
+        assert MCMASTER.capability("discussion_posts") == "unverified"
+        for inst in (MCMASTER, CARLETON):
+            assert inst.capability("discussion_forums") == "permitted"
 
 
 class TestPrecedence:

@@ -243,7 +243,58 @@ def _outline_pdf_bytes() -> bytes:
     return _PDF_CACHE
 
 
-def build_transport(restricted: bool) -> httpx.MockTransport:
+# --- Carleton-shaped payloads ---------------------------------------------
+#
+# Same DATA, different SHAPE. Every bug found when a second real instance was
+# pointed at this server was a shape assumption that held at McMaster, failed
+# elsewhere, and failed SILENTLY. The payloads above are McMaster-shaped, so the
+# suite could not see any of them. These are the differences that actually
+# mattered, measured live (docs/09).
+
+# Topics carry no `Url` in the listing. Without back-filling from the topic
+# detail record, guess_filename falls back to the title, which has no extension:
+# nothing is indexable and is_renderable is false for every file.
+CONTENT_ROOT_NO_URL = [
+    {
+        "Id": 900,
+        "Title": "Week 1 - Introduction",
+        "Type": "Module",
+        "Structure": [
+            {"Id": 4455, "Title": "Course Outline", "Type": "Topic", "TopicType": 1,
+             "LastModifiedDate": RECENT_UTC},
+            {"Id": 4456, "Title": "Course Website", "Type": "Topic", "TopicType": 3},
+        ],
+    }
+]
+
+# Posts carry PostingUserId and no role field at all, so author_role is only
+# recoverable by cross-referencing the roster.
+POSTS_NO_ROLE = [
+    {
+        "PostId": 5001, "ParentPostId": None, "PostingUserId": 7001,
+        "DatePosted": "2026-03-09T14:20:00.000Z",
+        "PostingUserDisplayName": "Jane Doe",
+        "Message": {"Text": "", "Html": "<p>Recursive or iterative for Q3?</p>"},
+    },
+    {
+        "PostId": 5002, "ParentPostId": 5001, "PostingUserId": 7002,
+        "DatePosted": "2026-03-09T16:45:00.000Z",
+        "PostingUserDisplayName": "Dr. Smith",
+        "Message": {"Text": "", "Html": "<p>Either is fine, document your choice.</p>"},
+    },
+]
+
+# Roles live in ClasslistRoleDisplayName, not RoleName, and the id that matches
+# PostingUserId is Identifier.
+CLASSLIST_CARLETON = [
+    {"Identifier": "7001", "ClasslistRoleDisplayName": "Student",
+     "DisplayName": "Jane Doe", "Email": "jane@example.ca"},
+    {"Identifier": "7002", "ClasslistRoleDisplayName": "Instructor",
+     "DisplayName": "Dr. Smith", "Email": "smith@example.ca"},
+]
+
+
+def build_transport(restricted: bool, shape: str = "mcmaster") -> httpx.MockTransport:
     """Route Valence paths to canned payloads.
 
     `restricted=True` makes the instructor-scope routes 403 with an HTML body,
@@ -262,6 +313,8 @@ def build_transport(restricted: bool) -> httpx.MockTransport:
             headers={"content-type": "application/json"},
         )
 
+    mcmaster = shape == "mcmaster"
+
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
 
@@ -274,7 +327,7 @@ def build_transport(restricted: bool) -> httpx.MockTransport:
         if p.endswith(f"/courses/{ORG}"):
             return ok({"Name": COURSE, "Code": "CS-2C03", "IsActive": True})
         if p.endswith("/content/root/"):
-            return ok(CONTENT_ROOT)
+            return ok(CONTENT_ROOT if mcmaster else CONTENT_ROOT_NO_URL)
         if "/content/topics/" in p and p.endswith("/file"):
             # A REAL pdf, not a stub. A stub only proves the error path; a real
             # one exercises download -> extract -> chunk -> embed -> search.
@@ -314,11 +367,15 @@ def build_transport(restricted: bool) -> httpx.MockTransport:
         if "/discussions/forums/" in p and p.endswith("/topics/"):
             return ok(TOPICS)
         if "/posts/" in p:
-            return ok(POSTS)
+            return ok(POSTS if mcmaster else POSTS_NO_ROLE)
         if p.endswith("/classlist/"):
-            return denied() if restricted else ok(
+            if restricted:
+                return denied()
+            return ok(
                 [{"Identifier": "1", "DisplayName": "Dr. Smith",
                   "RoleName": "Instructor", "EmailAddress": "smith@mcmaster.ca"}]
+                if mcmaster
+                else CLASSLIST_CARLETON
             )
         if "enrollments/orgUnits" in p:
             return denied() if restricted else ok(
@@ -359,6 +416,126 @@ def ctx(request, tmp_path, monkeypatch):
 
 async def _always_true() -> bool:
     return True
+
+
+@pytest.fixture(params=["mcmaster", "carleton"])
+def shaped_ctx(request, tmp_path, monkeypatch):
+    """Full-access AppContext, parametrized over INSTANCE SHAPE rather than
+    permissions.
+
+    Deliberately a separate fixture from `ctx` rather than a third parameter on
+    it: the shape-sensitive surface is content, discussions, and the roster, so
+    crossing shape with the permission axis would quadruple a suite that embeds
+    real PDF extraction and embedding to re-prove things shape cannot affect.
+    """
+    monkeypatch.setenv("AVENUE_MCP_STATE_DIR", str(tmp_path / "state"))
+    from avenue_mcp.config import get_settings
+
+    get_settings.cache_clear()
+
+    c = AppContext()
+    c.settings.session_path.parent.mkdir(parents=True, exist_ok=True)
+    c.settings.session_path.write_text(
+        json.dumps({"cookies": [{"name": "d2lSessionVal", "value": "x",
+                                 "domain": "avenue.cllmcmaster.ca", "path": "/"}],
+                    "origins": []}),
+        encoding="utf-8",
+    )
+    c.auth._client = httpx.AsyncClient(
+        base_url=c.settings.base_url,
+        transport=build_transport(False, shape=request.param),
+    )
+    monkeypatch.setattr(c.auth, "is_alive", _always_true)
+    c.shape = request.param  # type: ignore[attr-defined]
+    yield c
+    get_settings.cache_clear()
+
+
+class TestInstanceShapeInvariance:
+    """The tool layer must produce the same ANSWERS from either shape.
+
+    Each assertion here failed on the Carleton shape before its fix, and every
+    one of those failures was silent in production: a course with no searchable
+    files, a slide that could not be rendered, an instructor who could not be
+    told apart from a classmate.
+    """
+
+    async def test_files_are_identifiable_and_renderable(self, shaped_ctx):
+        from avenue_mcp.tools.content import get_course_content
+
+        out = await get_course_content(shaped_ctx, ORG)
+
+        topics = []
+
+        def collect(nodes):
+            for n in nodes or []:
+                topics.extend(n.get("topics") or [])
+                collect(n.get("modules"))
+
+        collect(out["modules"])
+        pdf = next(t for t in topics if t["title"] == "Course Outline")
+
+        # Before the fix these were None and False on the Carleton shape, so the
+        # model would never call get_page_image on a perfectly renderable PDF.
+        assert pdf["file_name"].endswith(".pdf"), shaped_ctx.shape
+        assert pdf["mime_type"] == "application/pdf", shaped_ctx.shape
+        assert pdf["is_renderable"] is True, shaped_ctx.shape
+
+    async def test_course_files_are_actually_indexed(self, shaped_ctx):
+        from avenue_mcp.tools.search import sync_course_materials
+
+        out = await sync_course_materials(shaped_ctx, ORG)
+
+        # The Carleton shape reported "found, 0 indexed, all unsupported" here.
+        assert out["files_indexed"] == 1, shaped_ctx.shape
+        assert out["files_skipped_unsupported"] == 0, shaped_ctx.shape
+        assert out["chunks_created"] >= 2, shaped_ctx.shape
+
+    async def test_indexed_file_is_searchable_with_a_page_citation(self, shaped_ctx):
+        from avenue_mcp.tools.search import search_course_materials, sync_course_materials
+
+        await sync_course_materials(shaped_ctx, ORG)
+        out = await search_course_materials(shaped_ctx, "late penalty", org_unit_id=ORG)
+
+        assert out["count"] >= 1, shaped_ctx.shape
+        assert "ten percent" in out["results"][0]["text"], shaped_ctx.shape
+
+    async def test_instructor_replies_are_attributable(self, shaped_ctx):
+        from avenue_mcp.tools.discussions import read_discussion_thread
+
+        out = await read_discussion_thread(shaped_ctx, ORG, 90, 412)
+
+        # The Carleton shape carries no role field, so every post came back
+        # "Unknown" and has_instructor_replies was always false -- collapsing the
+        # distinction that makes reading a thread worth anything.
+        assert out["count"] == 2, shaped_ctx.shape
+        roles = {p["author_role"] for p in out["posts"]}
+        assert roles == {"Student", "Instructor"}, f"{shaped_ctx.shape}: {roles}"
+        assert out["has_instructor_replies"] is True, shaped_ctx.shape
+
+    async def test_reply_tree_survives_either_shape(self, shaped_ctx):
+        from avenue_mcp.tools.discussions import read_discussion_thread
+
+        out = await read_discussion_thread(shaped_ctx, ORG, 90, 412)
+        parents = [p["parent_post_id"] for p in out["posts"]]
+
+        # Flattening destroys the question -> answer pairing.
+        assert 5001 in parents, shaped_ctx.shape
+
+    async def test_no_author_name_escapes_in_either_shape(self, shaped_ctx):
+        """Roster lookup must not become a name leak.
+
+        The Carleton fix reads the classlist to resolve roles, and that roster
+        carries names and emails. docs/07 requires posts to carry roles and not
+        names, so this pins the boundary rather than trusting it.
+        """
+        from avenue_mcp.tools.discussions import read_discussion_thread
+
+        out = await read_discussion_thread(shaped_ctx, ORG, 90, 412)
+        blob = json.dumps(out)
+
+        for name in ("Jane Doe", "Dr. Smith", "jane@example.ca", "smith@example.ca"):
+            assert name not in blob, f"{shaped_ctx.shape} leaked {name}"
 
 
 # --- tests ----------------------------------------------------------------

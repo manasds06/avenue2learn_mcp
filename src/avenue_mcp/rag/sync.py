@@ -17,6 +17,7 @@ from typing import Any
 from avenue_mcp.client.d2l import D2LClient
 from avenue_mcp.client import models as m
 from avenue_mcp.client.roles import role_map, role_of_post
+from avenue_mcp.client.topics import has_extension, resolve_many
 from avenue_mcp.config import Settings
 from avenue_mcp.errors import (
     APIError,
@@ -215,53 +216,41 @@ class Syncer:
     async def _resolve_missing_filenames(
         self, org_unit_id: int, topics: dict[int, dict[str, Any]]
     ) -> None:
-        """Back-fill file names from each topic's detail record when needed.
+        """Back-fill names for topics whose listing entry has no extension.
 
-        Some instances omit `Url` from the module *structure* listing while
-        returning it from `content/topics/{id}`. Without it, guess_filename falls
-        back to the display title -- which carries no extension -- so
-        `extractor.is_supported()` rejects every file and a course with real PDFs
-        reports "48 found, 0 indexed, 48 unsupported". Measured on Carleton
-        (docs/09); McMaster's listing includes Url, which is why this went
-        unnoticed.
+        The resolution itself lives in client/topics.py, shared with
+        tools/content.py -- these two were briefly separate implementations of
+        the same fix, which is precisely the drift that module exists to stop.
 
-        Only topics whose name has no usable extension are fetched, so an
-        instance that already returns Url costs nothing.
+        Only topics lacking a usable extension are fetched, so an instance whose
+        listing already carries `Url` costs nothing.
         """
         pending = [
             (tid, t)
             for tid, t in topics.items()
-            if not extractor.is_supported(t.get("file_name") or "")
+            if not has_extension(t.get("file_name") or "")
         ]
         if not pending:
             return
 
-        async def resolve(topic_id: int, topic: dict[str, Any]) -> None:
-            try:
-                detail = await self.client.get(
-                    "le", f"{org_unit_id}/content/topics/{topic_id}"
-                )
-            except APIError as exc:
-                log.debug("topic %s detail unreadable: %s", topic_id, exc)
-                return
-            if not isinstance(detail, dict):
-                return
-            # An absolute Url is an external link (a publisher site, a syllabus
-            # service), not a file hosted in Brightspace. Downloading it would
-            # fetch someone else's HTML, so leave it unsupported.
-            url = m.pick(detail, "Url", "Location")
-            if isinstance(url, str) and url.lower().startswith(("http://", "https://")):
-                return
-            name = m.guess_filename(detail)
+        resolved = await resolve_many(
+            self.client, org_unit_id, [dict(t, Id=tid) for tid, t in pending]
+        )
+        for (tid, topic), (name, mime) in zip(pending, resolved):
             if name and extractor.is_supported(name):
                 topic["file_name"] = name
-                topic["mime_type"] = m.mime_from_name(name)
+                topic["mime_type"] = mime
             if topic.get("last_modified") is None:
-                topic["last_modified"] = m.pick(
-                    detail, "LastModifiedDate", "LastModified"
-                )
-
-        await asyncio.gather(*(resolve(tid, t) for tid, t in pending))
+                try:
+                    detail = await self.client.get(
+                        "le", f"{org_unit_id}/content/topics/{tid}"
+                    )
+                except APIError:
+                    continue
+                if isinstance(detail, dict):
+                    topic["last_modified"] = m.pick(
+                        detail, "LastModifiedDate", "LastModified"
+                    )
 
     async def _index_file(
         self,
