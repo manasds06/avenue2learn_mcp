@@ -190,3 +190,18 @@ describe("every registered tool is callable", () => {
     expect(desc).toContain("does not return a student roster");
   });
 });
+
+describe("the package stays a reasonable download", () => {
+  it("ships only the ONNX runtime variant it actually uses", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+    const build = readFileSync(join(root, "build.mjs"), "utf8");
+
+    // Copying every variant made the package 94MB. The jsep (WebGPU) build
+    // alone is 25MB and unused, since embeddings run single-threaded on CPU.
+    expect(build).not.toMatch(/endsWith\("\.wasm"\)/);
+    expect(build).toContain("ort-wasm-simd-threaded.wasm");
+    expect(build).not.toContain("jsep.wasm");
+  });
+});

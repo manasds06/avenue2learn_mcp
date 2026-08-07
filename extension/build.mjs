@@ -54,12 +54,19 @@ async function copyStatic() {
   await mkdir(`${outdir}/vendor`, { recursive: true });
   await cp("node_modules/pdfjs-dist/build/pdf.worker.min.mjs", `${outdir}/vendor/pdf.worker.mjs`);
 
-  // onnxruntime WASM binaries, kept local so nothing executable is fetched
+  // onnxruntime WASM, kept local so nothing executable is fetched at runtime.
+  //
+  // ONLY the plain SIMD build (~12MB). onnxruntime-web also ships `jsep`
+  // (+25MB, WebGPU), `jspi` and `asyncify` variants; copying all four made the
+  // package 94MB for no benefit, since embeddings run single-threaded on CPU
+  // here. If WebGPU is ever wanted, add jsep back deliberately and re-measure.
   const ortDist = "node_modules/onnxruntime-web/dist";
+  const ORT_FILES = ["ort-wasm-simd-threaded.wasm", "ort-wasm-simd-threaded.mjs"];
   if (existsSync(ortDist)) {
     await mkdir(`${outdir}/vendor/ort`, { recursive: true });
-    for (const file of await readdir(ortDist)) {
-      if (file.endsWith(".wasm") || file.endsWith(".mjs")) {
+    const available = await readdir(ortDist);
+    for (const file of ORT_FILES) {
+      if (available.includes(file)) {
         await cp(`${ortDist}/${file}`, `${outdir}/vendor/ort/${file}`);
       }
     }

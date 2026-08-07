@@ -48,6 +48,10 @@ function configure(): void {
   // Single-threaded: SharedArrayBuffer needs cross-origin isolation headers
   // that an extension page does not have.
   wasm["numThreads"] = 1;
+  // Only the plain SIMD build is shipped (see build.mjs), so do not let ORT
+  // probe for the jsep/WebGPU variant we deliberately left out.
+  wasm["simd"] = true;
+  wasm["proxy"] = false;
   (env.backends.onnx as { wasm?: unknown }).wasm = wasm;
 
   env.allowLocalModels = false;
