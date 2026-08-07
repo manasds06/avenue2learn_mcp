@@ -76,10 +76,22 @@ GET /d2l/api/lp/{v}/enrollments/myenrollments/
 
 The root of everything. Returns the org units the caller is enrolled in, each with its `OrgUnit.Id` (the `orgUnitId` every other route needs), name, code, and type.
 
+**Filter server-side.** The route accepts query parameters that do most of the work for us:
+
+| Param | Use |
+|---|---|
+| `orgUnitTypeId` | Restrict to course offerings — drops departments and semester containers |
+| `isActive` | Current enrollments only |
+| `canAccess` | Excludes offerings that are enrolled but closed |
+| `startDateTime` / `endDateTime` | Term windowing |
+| `sortBy` | `StartDate`, `EndDate`, `OrgUnitName`, `PinDate`, `OrgUnitTypeId` |
+| `bookmark` | Paging cursor |
+
+Each `MyOrgUnitInfo` carries an `Access` block with `IsActive`, `StartDate`, `EndDate`, and `CanAccess`.
+
 Notes:
 - **Paged.** Response carries a bookmark; follow it until exhausted. A student with many past terms will have more than one page.
-- Includes **inactive and past** enrollments. Filter to current offerings by org-unit type (`Course Offering`) and by term/date, or courses from three years ago will pollute every result.
-- The `OrgUnitTypeId` distinguishes course offerings from departments and semesters. Only offerings are useful to us.
+- Includes **inactive and past** enrollments by default — filter, or courses from three years ago pollute every result.
 
 ### Course details
 
@@ -87,9 +99,11 @@ Notes:
 GET /d2l/api/lp/{v}/courses/{orgUnitId}
 ```
 
-**Status:** 🔵 Expected. **Backs:** `list_courses` (enrichment).
+**Status:** 🔵 Expected. **Backs:** `list_courses` (enrichment — *rarely needed*).
 
-Start/end dates, course code, active flag. Useful for determining "current" more reliably than name-parsing.
+Start/end dates, course code, active flag.
+
+**Call this only when a field is genuinely missing.** An earlier draft had `list_courses` enriching every course through this route, which is an N+1 against data `myenrollments` already returned in its `Access` block. One extra request per course, per call, for nothing.
 
 ---
 
@@ -156,13 +170,15 @@ Returns raw file bytes, not JSON. Handle accordingly:
 GET /d2l/api/le/{v}/{orgUnitId}/dropbox/folders/
 ```
 
-**Status:** ⚠️ **Uncertain — the Valence docs mark this Instructor-scope.**
+**Status:** ⚠️ Uncertain — but **less alarming than an earlier draft claimed.**
 
 **Backs:** `list_assignments`, and feeds `get_upcoming_deadlines`.
 
 This is the route that returns assignment names, due dates, point values, and instructions. If a student token can call it, `list_assignments` is straightforward. If it 403s, we need the fallback below.
 
-It is genuinely plausible that this works for students despite the docs' labelling — students obviously *can* see their assignment list in the UI, and the UI is calling this API. But "the UI can" and "this exact route can" are not the same claim, and the docs say Instructor. **Probe before promising.**
+> **Correction.** This entry previously read "the Valence docs mark this Instructor-scope", and Phase 0's urgency rested largely on that. The Valence page documents only the scope `dropbox:folders:read` and a generic "no permission → 403" — **there is no Instructor-only annotation.** Further, `joshuasoup/d2l-mcp` calls this exact route as its assignments source on student accounts. So the likely outcome is that it works.
+>
+> It stays ⚠️ rather than 🔵 because "likely" isn't "measured", and because Avenue's configuration is McMaster's to set. But it should no longer be treated as the feature-killer that justifies blocking all downstream work.
 
 #### Fallback if blocked
 
@@ -243,6 +259,8 @@ GET /d2l/api/le/{v}/{orgUnitId}/grades/values/myGradeValues/
 
 Returns the caller's grade values for the course: points earned, points possible, weighted values, display strings.
 
+**This route carries more than it first appears.** On a weighted gradebook the values include `WeightedNumerator` and `WeightedDenominator`, which is enough to compute a *current standing* without the structure route below. Only the forward-looking projection ("what do I need on the final") strictly requires the full weight table. Probe both before concluding that `analyze_grade_summary` has to degrade.
+
 ### Grade objects (the gradebook structure)
 
 ```
@@ -275,27 +293,40 @@ Filter to non-expired items and sort newest-first by default.
 
 ## Calendar
 
+Two variants, and **the cross-course one is the one we want**:
+
 ```
-GET /d2l/api/le/{v}/{orgUnitId}/calendar/events/myEvents/
+GET /d2l/api/le/{v}/calendar/events/myEvents/            ← all courses in ONE request
+    ?orgUnitIdsCSV={id,id,id}&startDateTime={utc}&endDateTime={utc}
+
+GET /d2l/api/le/{v}/{orgUnitId}/calendar/events/myEvents/   ← single course
+    ?startDateTime={utc}&endDateTime={utc}
 ```
 
-**Status:** 🔵 Expected — `myEvents` is learner-scoped.
+**Status:** 🔵 Expected — `myEvents` is learner-scoped (`calendar:my_events:read`).
 
 **Backs:** `get_upcoming_deadlines`, and the assignment fallback.
 
-Calendar events for the caller in a course, including assignment and quiz due dates. Accepts date-range parameters.
+Calendar events for the caller, including assignment and quiz due dates.
 
-This route is doing double duty: it's the primary source for a unified cross-course deadline view, *and* the insurance policy if the dropbox folder listing turns out to be instructor-only. Worth probing early.
+**`startDateTime` and `endDateTime` are required, not optional** — and `orgUnitIdsCSV` is required on the cross-course variant. A bare call returns `400`. This is worth stating loudly because the probe would otherwise log a `400` on the single most important fallback route and mistake a malformed request for a blocked one.
+
+The cross-course variant collapses what would be an N-request fan-out into one call. That materially changes `get_upcoming_deadlines` — see [`03-mcp-tools.md`](03-mcp-tools.md).
+
+This route is doing double duty: it's the primary source for a unified deadline view, *and* the insurance policy if the dropbox folder listing turns out to be instructor-only. Worth probing early.
 
 ---
 
 ## Class list
 
 ```
-GET /d2l/api/lp/{v}/{orgUnitId}/classlist/
+GET /d2l/api/le/{v}/{orgUnitId}/classlist/
+GET /d2l/api/le/{v}/{orgUnitId}/classlist/paged/     ← preferred; supports roleId + paging
 ```
 
-**Status:** ⚠️ **Uncertain — documented as Instructor-scope. Realistically likely blocked for students.**
+> **Corrected.** An earlier draft of this table placed classlist under `lp`. It is under **`le`**. The distinction is not cosmetic: the wrong path returns `404`, the probe would record "blocked", and `get_class_list` would be permanently degraded on the strength of a typo. Scope is `enrollment:orgunit:read`; the paged variant accepts `roleId`, `searchTerm`, and `onlyShowShownInGrades`.
+
+**Status:** ⚠️ **Uncertain — realistically likely blocked for students.**
 
 **Backs:** `get_class_list`.
 
@@ -377,8 +408,11 @@ The `403` vs `401` distinction is load-bearing: `403` on a healthy session is a 
 | My grades | `GET /le/{v}/{id}/grades/values/myGradeValues/` | 🔵 | `get_grades` |
 | Grade structure | `GET /le/{v}/{id}/grades/` | ⚠️ | `analyze_grade_summary` |
 | Announcements | `GET /le/{v}/{id}/news/` | 🔵 | `list_announcements` |
-| My calendar | `GET /le/{v}/{id}/calendar/events/myEvents/` | 🔵 | `get_upcoming_deadlines` |
-| Class list | `GET /lp/{v}/{id}/classlist/` | ⚠️ | `get_class_list` |
+| My calendar (all courses) | `GET /le/{v}/calendar/events/myEvents/` | 🔵 | `get_upcoming_deadlines` |
+| My calendar (one course) | `GET /le/{v}/{id}/calendar/events/myEvents/` | 🔵 | `get_upcoming_deadlines` |
+| Class list | `GET /le/{v}/{id}/classlist/paged/` | ⚠️ | `get_class_list` |
 | Submit work | `POST /le/{v}/{id}/dropbox/folders/{f}/submissions/mysubmissions/` | 🔒 | v2 |
 
-**Four ⚠️ rows and they are not evenly important.** The dropbox folder listing is the one to probe first — it gates the assignments feature entirely. The class list is the one most likely to be blocked, and the one where being blocked matters least.
+**Four ⚠️ rows and they are not evenly important.** The class list is the one most likely to be blocked, and the one where being blocked matters least. The dropbox folder listing was previously called out as the critical unknown; with the Instructor-scope claim withdrawn, the grade-structure route is now the ⚠️ with the most riding on it — though see the note there, since `myGradeValues` may already carry enough to compute a current standing.
+
+**Not in v1: quizzes.** Valence exposes `GET /le/{v}/{id}/quizzes/` with `StartDate`/`EndDate`/`DueDate`, but no learner-specific variant is documented, and tests are out of scope for this release. Quiz due dates still appear in the calendar feed, which is the only place `get_upcoming_deadlines` sources them from. No tool promises more than that.

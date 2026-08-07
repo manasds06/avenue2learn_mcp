@@ -21,7 +21,11 @@ Sizes assume part-time work by one person and are estimates, not commitments. Ph
 
 **Nothing downstream is trustworthy until this runs.**
 
-Four routes in [`02-api-surface.md`](02-api-surface.md) are marked ⚠️ — documented as instructor-scope, unknown for students. Two features hinge on them: assignments (`dropbox/folders/`) and grade projection (`grades/`). Building the tool layer before knowing the answers means designing against guesses.
+Two separate unknowns, and the first is bigger than the plan originally treated it:
+
+**The auth mechanism itself is unresolved.** [`01-authentication.md`](01-authentication.md) describes three strategies; the prior art we can inspect uses the one with the worst ergonomics. Whether the browser is needed once a day or once an hour is decided here, and it changes what the README can honestly promise.
+
+**Several routes are marked ⚠️** — unknown for students. Grade projection (`grades/`) hinges on one. Assignments (`dropbox/folders/`) was thought to, but the Instructor-scope claim behind that has been withdrawn ([`02`](02-api-surface.md)) and it's now expected to work.
 
 ### Deliverable
 
@@ -38,7 +42,8 @@ A throwaway script — `scripts/probe.py`, not shipped, not polished — that:
 
 | Question | Why it matters |
 |---|---|
-| Does `GET .../dropbox/folders/` work for a student? | Gates the entire assignments feature |
+| **Which auth strategy works — cookies, minted bearer, or captured bearer?** | **Gates everything.** Decides whether the browser is a one-time login or an hourly runtime dependency ([`01`](01-authentication.md) §B0) |
+| Does `GET .../dropbox/folders/` work for a student? | Gates the full assignments feature — though the Instructor-scope claim has been withdrawn, so this is now expected to pass |
 | Does `GET .../grades/` (structure) work? | Gates grade projection |
 | Does `GET .../classlist/` work? | Expected no; determines `get_class_list`'s honest shape |
 | Does `.../feedback/...` work for own submissions? | Nice-to-have enrichment |
@@ -51,6 +56,7 @@ A throwaway script — `scripts/probe.py`, not shipped, not polished — that:
 
 ### Exit criteria
 
+- [ ] **The auth strategy is decided and recorded** ([`08`](08-api-probe-results.md) §B0); the two that lost are deleted from [`01`](01-authentication.md)
 - [ ] Every route in [`02-api-surface.md`](02-api-surface.md) marked ✅ Verified or ⛔ Blocked — no ⚠️ remaining
 - [ ] [`08-api-probe-results.md`](08-api-probe-results.md) filled in with real data
 - [ ] [`02-api-surface.md`](02-api-surface.md) status column updated **from** those results
@@ -78,8 +84,9 @@ The foundation. Everything else calls this.
 
 ### Exit criteria
 
-- [ ] `avenue-mcp login` completes a real MacID + MFA sign-in and writes `session.json` at `0600`
-- [ ] A second process loads that session and calls `whoami` successfully — **no browser**
+- [ ] `avenue-mcp login` completes a real MacID + MFA sign-in and writes `session.json`
+- [ ] **The session file is verifiably owner-only** — `icacls session.json` on Windows, `ls -l` on POSIX. Not "we called `chmod`": `chmod` is a no-op on Windows ([`01`](01-authentication.md)), so this must be checked, not assumed.
+- [ ] A second process loads that session and calls `whoami` successfully — **no browser**, *provided Phase 0 found cookie or minted-bearer auth works.* If the probe found only `CapturedBearerAuth` viable, this criterion is retired and the browser-refresh interval is documented instead.
 - [ ] `myenrollments` returns real courses, pages correctly past page one
 - [ ] API version negotiated from `/d2l/api/versions/`, not hardcoded anywhere
 - [ ] Expired session produces `SessionExpiredError`, not a JSON parse failure

@@ -87,7 +87,53 @@ TBD
 
 ## B. Authentication behavior
 
-**The most operationally important section** — it determines how the client detects expiry, which is the difference between a clear error and a confusing JSON parse failure.
+**The most operationally important section.** B0 gates the design; the rest determines how the client detects expiry, which is the difference between a clear error and a confusing JSON parse failure.
+
+### B0 — ⚠️ Which auth strategy works — **RUN THIS FIRST**
+
+The plan supports three strategies ([`01`](01-authentication.md)). This block decides which one the server pins, and whether the browser is a one-time login step or an hourly runtime dependency.
+
+**Test 1 — cookies alone.** Load `storage_state`, send the cookie jar, no `Authorization` header:
+
+```
+GET /d2l/api/lp/{v}/users/whoami
+```
+
+| Field | Value |
+|---|---|
+| **Status with cookies only** | **TBD** |
+| Content-Type returned | TBD |
+| Was any `Authorization` header needed? | TBD |
+
+**Test 2 — mint a bearer from the session.**
+
+```
+POST /d2l/lp/auth/xsrf-tokens      → grab referrerToken
+POST /d2l/lp/auth/oauth2/token     → cookies + X-Csrf-Token
+```
+
+| Field | Value |
+|---|---|
+| Status | TBD |
+| Response shape | TBD |
+| Field carrying the token | TBD |
+| Token lifetime (`expires_in`?) | TBD |
+| Does the minted token authorize `whoami`? | TBD |
+| **Can it be re-minted without a browser?** | **TBD** |
+
+**Test 3 — capture from frontend traffic.** During Playwright login, listen for requests to `/d2l/api/` and record whether an `Authorization: Bearer` header is present.
+
+| Field | Value |
+|---|---|
+| Does the frontend send a Bearer to `/d2l/api/`? | TBD |
+| Token captured successfully? | TBD |
+
+**Verdict:** ⬜ `CookieSessionAuth` · ⬜ `BearerTokenAuth` · ⬜ `CapturedBearerAuth`
+
+**Consequences to record:**
+- If cookies work → simplest client, browser is login-only, re-login roughly daily.
+- If only minting works → browser still login-only, but XSRF is on the critical path from the first call.
+- If only capture works → **the browser becomes an ~hourly runtime dependency.** Update the README, `docs/01`'s session-lifetime table, and Phase 1's "no browser" exit criterion to match, rather than quietly leaving a promise the software can't keep.
 
 ### B1 — Cookies
 
@@ -402,14 +448,19 @@ GET /d2l/api/le/{v}/{orgUnitId}/news/
 ### C14 — Calendar / my events 🔵
 
 ```
-GET /d2l/api/le/{v}/{orgUnitId}/calendar/events/myEvents/
+GET /d2l/api/le/{v}/calendar/events/myEvents/?orgUnitIdsCSV=…&startDateTime=…&endDateTime=…
+GET /d2l/api/le/{v}/{orgUnitId}/calendar/events/myEvents/?startDateTime=…&endDateTime=…
 ```
 
 **Doing double duty: primary deadline source *and* the C7 fallback.**
 
+> **`startDateTime` and `endDateTime` are required** (plus `orgUnitIdsCSV` on the cross-course variant). A bare call returns `400`. Do not record that as "blocked" — it's a malformed request.
+
 | Field | Value |
 |---|---|
-| Status | TBD |
+| Status, cross-course variant | TBD |
+| Status, per-course variant | TBD |
+| **Does the cross-course variant work?** (saves N-1 requests) | TBD |
 | Events returned | TBD |
 | **Do assignment due dates appear here?** | TBD |
 | Do quiz due dates appear? | TBD |
@@ -424,8 +475,11 @@ The bolded row is the fallback test. If assignment due dates *don't* appear here
 ### C15 — ⚠️ Class list
 
 ```
-GET /d2l/api/lp/{v}/{orgUnitId}/classlist/
+GET /d2l/api/le/{v}/{orgUnitId}/classlist/
+GET /d2l/api/le/{v}/{orgUnitId}/classlist/paged/
 ```
+
+> **Path corrected: `le`, not `lp`.** Probe both variants. A `404` here almost certainly means a wrong path, not a permission wall — record `403` vs `404` separately, because conflating them would degrade `get_class_list` for the wrong reason.
 
 | Field | Value |
 |---|---|
@@ -515,8 +569,9 @@ If both C15 and C16 are blocked, `get_class_list` reports instructor names from 
 | `grades/values/myGradeValues/` | 🔵 | TBD |
 | **`grades/`** | ⚠️ | **TBD** |
 | `news/` | 🔵 | TBD |
-| `calendar/events/myEvents/` | 🔵 | TBD |
-| `classlist/` | ⚠️ | TBD |
+| `calendar/events/myEvents/` (cross-course) | 🔵 | TBD |
+| `calendar/events/myEvents/` (per-course) | 🔵 | TBD |
+| `le/…/classlist/paged/` | ⚠️ | TBD |
 | `enrollments/orgUnits/*/users/` | ⚠️ | TBD |
 
 ### Feature viability
@@ -536,6 +591,8 @@ If both C15 and C16 are blocked, `get_class_list` reports instructor names from 
 
 ### Required doc changes
 
+- [ ] **Record the B0 auth verdict in [`01-authentication.md`](01-authentication.md)** and delete the two strategies that lost
+- [ ] **If `CapturedBearerAuth` won**, correct every "no browser at runtime" claim in `01`, `05`, `06`, and the README
 - [ ] Update status column in [`02-api-surface.md`](02-api-surface.md)
 - [ ] Revise `list_assignments` in [`03-mcp-tools.md`](03-mcp-tools.md) if C7 blocked
 - [ ] Revise `analyze_grade_summary` if C12 blocked

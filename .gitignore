@@ -1,0 +1,27 @@
+# --- Credentials and session state -------------------------------------
+# session.json is equivalent to a logged-in Avenue session. Never commit it.
+.avenue-mcp/
+session.json
+*.session.json
+storage_state.json
+
+# --- Probe output: raw API responses, unredacted -----------------------
+tests/fixtures/
+scripts/probe-output/
+
+# --- Python ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# --- Editors / OS ------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

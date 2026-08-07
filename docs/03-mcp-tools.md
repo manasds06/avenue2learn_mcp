@@ -179,13 +179,15 @@ Three tools depend on routes marked ⚠️ in [`02-api-surface.md`](02-api-surfa
 
 ### `get_upcoming_deadlines`
 
-> Returns assignments, quizzes, and other dated items due within a time window, **across all your active courses**, sorted soonest-first. Read-only.
+> Returns dated items — assignments, and anything else your instructors put on the course calendar — due within a time window, **across all your active courses**, sorted soonest-first. Read-only.
 >
 > This is the tool for "what's due this week?", "what's coming up?", or "am I forgetting anything?" — the most common Avenue question there is.
 >
+> Note that this reflects the course calendar. An item that isn't on the calendar won't appear here, so it's a strong answer to "what's coming up" and not a guarantee of completeness.
+>
 > Use `list_assignments` instead when you want the complete assignment list for **one** course, including ones already past or submitted.
 
-**Backs:** `GET /le/{v}/{id}/calendar/events/myEvents/` across all active courses, merged with `list_assignments` data where available
+**Backs:** `GET /le/{v}/calendar/events/myEvents/?orgUnitIdsCSV=…` — the cross-course variant, **one request for every course** — merged with `list_assignments` data where available
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
@@ -213,7 +215,11 @@ Three tools depend on routes marked ⚠️ in [`02-api-surface.md`](02-api-surfa
 }
 ```
 
-**Notes.** Fans out across every active course, so it is the most request-heavy read tool — throttled per [`02-api-surface.md`](02-api-surface.md) and cached briefly. `generated_at` is included so the model can tell the user how fresh the answer is instead of implying live data.
+**Notes.** An earlier draft called this "the most request-heavy read tool" because it fanned out one calendar call per course. It doesn't have to: the cross-course `myEvents` variant takes an `orgUnitIdsCSV` and answers for every course at once. Cost is one call for the course list plus one for the calendar — cheaper than `list_assignments` on a single course.
+
+`generated_at` is included so the model can tell the user how fresh the answer is instead of implying live data.
+
+Remember that `startDateTime` and `endDateTime` are **required** on this route; `days_ahead` is converted into that window rather than passed through.
 
 **Timezone matters.** Brightspace returns UTC; McMaster deadlines are set in Eastern time and typically land at 11:59 PM local, which is `03:59` or `04:59` UTC *the next day* depending on DST. Times are returned as UTC ISO-8601 with an explicit local rendering, because a tool that reports "due March 16" for a March 15 deadline is worse than one that reports nothing.
 
@@ -287,7 +293,9 @@ Three tools depend on routes marked ⚠️ in [`02-api-surface.md`](02-api-surfa
 }
 ```
 
-**⚠️ Contingent on Phase 0.** If `GET /le/{v}/{id}/grades/` is blocked, weights are unavailable. In that case `weights_available` is `false`, the projection block is omitted entirely, and `caveats` explains why.
+**⚠️ Contingent on Phase 0 — but less so than it looks.** If `GET /le/{v}/{id}/grades/` is blocked, the full weight table is unavailable and `weights_available` is `false`, the projection block is omitted entirely, and `caveats` explains why.
+
+Note the two capabilities degrade separately. `myGradeValues` carries `WeightedNumerator`/`WeightedDenominator` on a weighted gradebook, so **current standing may still be computable** even with the structure route blocked. Only the forward projection truly needs the weight table. Report the standing you can compute and omit only the projection — collapsing both into one failure throws away a correct answer.
 
 **This tool must never fabricate a projection from incomplete weights.** A confidently wrong "you need 74% on the final" is materially worse than "I can't compute that — the weights aren't accessible." Grade math is exactly where a plausible wrong number does real damage.
 
@@ -337,7 +345,7 @@ Three tools depend on routes marked ⚠️ in [`02-api-surface.md`](02-api-surfa
 >
 > **Note:** McMaster restricts full student rosters. This tool returns instructor and TA information; if a complete class roster is unavailable to your account it will say so explicitly rather than returning a partial list without explanation.
 
-**Backs:** `GET /lp/{v}/{id}/classlist/` ⚠️, falling back to role-filtered enrollments
+**Backs:** `GET /le/{v}/{id}/classlist/paged/` ⚠️ (note: `le`, not `lp`), falling back to role-filtered enrollments
 
 | Input | Type | Default | Notes |
 |---|---|---|---|
@@ -480,11 +488,11 @@ Every tool maps to at least one route; every non-internal route backs at least o
 
 | Tool | Primary routes | Status |
 |---|---|---|
-| `list_courses` | `myenrollments`, `courses/{id}` | 🔵 |
+| `list_courses` | `myenrollments` (server-side filtered) | 🔵 |
 | `get_course_content` | `content/root`, `content/modules/*/structure` | 🔵 |
 | `read_content_file` | `content/topics/{t}`, `.../file` | 🔵 |
 | `list_assignments` | `dropbox/folders/`, `mysubmissions`, `feedback` | ⚠️ |
-| `get_upcoming_deadlines` | `calendar/events/myEvents`, (+ dropbox) | 🔵 |
+| `get_upcoming_deadlines` | `calendar/events/myEvents` cross-course, (+ dropbox) | 🔵 |
 | `get_grades` | `grades/values/myGradeValues`, `grades/` | 🔵 / ⚠️ |
 | `analyze_grade_summary` | same as `get_grades` | ⚠️ |
 | `list_announcements` | `news/` | 🔵 |

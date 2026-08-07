@@ -7,16 +7,18 @@ Module layout, data flow, configuration, errors, caching.
 | Concern | Choice | Why |
 |---|---|---|
 | Language | Python 3.11+ | Best ecosystem for the RAG half — PDF/DOCX/PPTX parsing and local embeddings are all mature here |
-| MCP framework | `mcp` (official Python SDK), FastMCP API | Decorator-based tool registration; reference implementation |
+| MCP framework | `mcp` >= 2.0 (official Python SDK), `MCPServer` API | Decorator-based tool registration; reference implementation. **SDK 2.0 renamed `FastMCP` to `MCPServer`** — older guides referencing `mcp.server.fastmcp` do not apply. |
 | HTTP | `httpx` | Async, HTTP/2, proper cookie-jar handling |
 | Browser | `playwright` | Login only. Not used for scraping. |
 | Storage | `sqlite3` (stdlib) + FTS5 | Zero-config, single file, full-text search built in |
-| Embeddings | `fastembed` | ONNX, CPU-fast, no PyTorch |
-| Documents | `pymupdf`, `python-docx`, `python-pptx`, `beautifulsoup4` | |
+| Embeddings | `fastembed` | ONNX, CPU-fast, no PyTorch. **Optional `[rag]` extra** — see below. |
+| Documents | `pymupdf`, `python-docx`, `python-pptx`, `beautifulsoup4` | All but `beautifulsoup4` are in the `[rag]` extra |
 | Validation | `pydantic` v2 | Tool schemas, config, API response models |
 | Packaging | `uv` + `pyproject.toml` | |
 
 **Deliberately absent: any LLM SDK.** The server never calls a model. That keeps it provider-agnostic, key-free, cheap to test, and means a tool call is a network fetch rather than an inference. If you find yourself wanting to add `anthropic` as a dependency, the logic in question belongs in the client instead.
+
+**The RAG dependencies are an optional extra**, installed with `pip install -e ".[rag]"`. `fastembed` pulls in `onnxruntime`, whose wheel availability lags new Python releases — and the whole read-only tool surface (Phases 1–2) has no use for it. Isolating it means a Python version that `onnxruntime` doesn't yet support costs you course-file search, not the entire server.
 
 ## Layout
 
@@ -34,8 +36,10 @@ avenue2learn_mcp/
     │
     ├── auth/
     │   ├── base.py          # AuthProvider protocol
-    │   ├── session.py       # CookieSessionAuth + SessionManager
-    │   ├── login.py         # Playwright login flow
+    │   ├── session.py       # SessionManager, CookieSessionAuth, strategy resolution
+    │   ├── bearer.py        # BearerTokenAuth / CapturedBearerAuth — see 01-authentication.md
+    │   ├── login.py         # Playwright login flow + bearer capture
+    │   ├── filelock.py      # per-platform owner-only permissions (chmod / icacls)
     │   └── oauth.py         # documented stub — see 01-authentication.md
     │
     ├── client/
@@ -129,7 +133,9 @@ Environment variables, loaded via `pydantic-settings`. No config file, no CLI fl
 
 ```
 ~/.avenue-mcp/
-├── session.json          # Playwright storage_state — 0600, treat as a credential
+├── session.json          # Playwright storage_state + captured bearer — treat as a credential
+│                         #   POSIX: chmod 0600.  Windows: icacls, inheritance broken.
+│                         #   chmod alone is a NO-OP on Windows — see 01-authentication.md
 ├── index.db              # SQLite: documents, chunks, FTS5, meta
 ├── vectors.npy           # embedding matrix
 ├── cache/                # downloaded course files
@@ -184,7 +190,7 @@ Three layers, different lifetimes.
 | Files | disk | until changed | Downloaded course files |
 | Index | disk | until re-synced | Chunks + vectors |
 
-The response cache exists because `get_upcoming_deadlines` fans out across every active course. Without it, three consecutive "what's due?" questions triple the request count for identical data.
+The response cache was originally justified by `get_upcoming_deadlines` fanning out across every active course. That justification is gone — the cross-course calendar route makes it two requests total ([`02`](02-api-surface.md)). The cache still earns its place for the content tree and enrollment list, which are stable, re-read constantly, and genuinely expensive to walk. It's just no longer load-bearing.
 
 **Never cached:** grades and submission status. Both change in ways the user cares about immediately, and a stale grade is a bad answer. The cost is a couple of extra requests; the alternative is telling someone they got 92 when the prof regraded it to 78.
 
@@ -246,22 +252,40 @@ Phase 0's captured responses become the fixture corpus. That's a second reason t
 
 Registered in the MCP client config:
 
+With `uv`:
+
 ```json
 {
   "mcpServers": {
     "avenue": {
       "command": "uv",
-      "args": ["run", "--directory", "/home/nela/github/avenue2learn_mcp", "avenue-mcp", "serve"],
+      "args": ["run", "--directory", "/path/to/avenue2learn_mcp", "avenue-mcp", "serve"],
       "env": { "AVENUE_MCP_LOG_LEVEL": "INFO" }
     }
   }
 }
 ```
 
+**Without `uv`** — a plain venv, which is the more portable assumption since `uv` is not always installed:
+
+```json
+{
+  "mcpServers": {
+    "avenue": {
+      "command": "C:\\path\\to\\avenue2learn_mcp\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "avenue_mcp", "serve"],
+      "env": { "AVENUE_MCP_LOG_LEVEL": "INFO" }
+    }
+  }
+}
+```
+
+On POSIX the command is `.venv/bin/python` with the same args. Invoking the interpreter directly rather than the console script avoids depending on the entry point being on `PATH`, which it generally isn't when a GUI client spawns the server.
+
 Login is a separate, interactive command run in a terminal:
 
 ```
-uv run avenue-mcp login
+uv run avenue-mcp login          # or: .venv/Scripts/python -m avenue_mcp login
 ```
 
 Deliberately separate from `serve`. Login needs a visible browser window and a human; the server runs headless under a client. Conflating them produces a server that hangs on a window nobody can see.

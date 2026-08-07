@@ -4,8 +4,8 @@ An MCP server that gives an AI assistant access to **Avenue to Learn**, McMaster
 
 Ask your assistant what's due this week, what the marking scheme actually says, or what you need on the final — and get answers grounded in your real course data instead of guesses.
 
-> **Status: design complete, implementation not started.**
-> This repository currently contains the build plan and research. No server code exists yet. Start at [`docs/00-overview.md`](docs/00-overview.md).
+> **Status: Phases 1–2 built, Phase 0 probe not yet run against a live account.**
+> Auth, HTTP client, and all nine read-only tools are implemented; the server starts and lists its tools. What remains is running `avenue-mcp login` + `avenue-mcp probe` once, which settles the auth strategy and which routes a student account can actually reach — then reconciling the docs with what it finds. Phase 3 (course-file search) is designed but not built. Start at [`docs/00-overview.md`](docs/00-overview.md).
 
 ---
 
@@ -31,7 +31,9 @@ Example questions it's built to answer:
 
 Three design decisions worth knowing up front:
 
-**Authentication is a real browser login.** D2L's official API path (Valence OAuth) requires a Brightspace administrator to register an application — students can't. So instead you log in once through a real browser with your MacID and MFA, and the server reuses that session to call the same REST API Brightspace's own frontend uses. You get exactly your own permissions, nothing more. → [`docs/01-authentication.md`](docs/01-authentication.md)
+**Authentication is a real browser login.** D2L's official API path (Valence OAuth) requires a Brightspace administrator to register an application — students can't. So instead you log in once through a real browser with your MacID and MFA, and the server reuses that session to call the same REST API Brightspace's own frontend uses. You get exactly your own permissions, nothing more.
+
+*Exactly how* the session is reused — cookies, or a short-lived bearer token minted from them — is unresolved until the Phase 0 probe runs, and it determines whether you log in about once a day or about once an hour. The server implements all three viable strategies and picks the best one that works. → [`docs/01-authentication.md`](docs/01-authentication.md)
 
 **The server contains no AI model.** It fetches, parses, and returns structured data. All the reasoning happens in your MCP client. No API keys, works with any client, and a tool call is a network fetch rather than an inference.
 
@@ -71,15 +73,49 @@ The reason is simple: **a submission cannot be undone.** Every read operation ca
 | [`07-risks-and-policy.md`](docs/07-risks-and-policy.md) | Academic integrity, ToS, data handling |
 | [`08-api-probe-results.md`](docs/08-api-probe-results.md) | Phase 0 findings *(template — not yet run)* |
 
-## Planned stack
+## Setup
 
-Python 3.11+ · FastMCP · httpx · Playwright (login only) · SQLite + FTS5 · fastembed · pymupdf / python-docx / python-pptx
+```bash
+python -m venv .venv
+.venv/Scripts/python -m pip install -e .        # POSIX: .venv/bin/python
+.venv/Scripts/python -m playwright install chromium
+
+.venv/Scripts/python -m avenue_mcp login        # MacID + MFA, once
+.venv/Scripts/python -m avenue_mcp status       # which auth strategy resolved
+.venv/Scripts/python -m avenue_mcp probe        # Phase 0: what can this account reach?
+```
+
+Course-file search (Phase 3) needs the optional extras: `pip install -e ".[rag]"`. They're separate because `fastembed` pulls in `onnxruntime`, whose wheels lag new Python releases — an unsupported Python should cost you search, not the whole server.
+
+Register with an MCP client:
+
+```json
+{
+  "mcpServers": {
+    "avenue": {
+      "command": "C:\\path\\to\\avenue2learn_mcp\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "avenue_mcp", "serve"]
+    }
+  }
+}
+```
+
+Two useful checks, neither needing a session:
+
+```bash
+.venv/Scripts/python scripts/check_tools.py   # server starts, lists 9 read-only tools
+.venv/Scripts/python scripts/selfcheck.py     # timezone + grade-projection honesty
+```
+
+## Stack
+
+Python 3.11+ · `mcp` ≥ 2.0 (`MCPServer`) · httpx · Playwright (login only) · SQLite + FTS5 · fastembed · pymupdf / python-docx / python-pptx
 
 Deliberately absent: any LLM SDK.
 
 ## Next step
 
-**Phase 0 — the probe.** Several API routes are documented as instructor-scope, and whether a student account can reach them determines what the assignment and grade-projection features can honestly promise. Half a day of work that decides two headline features.
+**Phase 0 — the probe.** Two things get settled: which authentication strategy Avenue actually accepts (which sets whether you re-login daily or hourly), and which uncertain routes a student account can reach (which sets what the grade-projection and class-list features can honestly promise). Half a day of work that decides the project's ergonomics and two features.
 
 Details in [`docs/06-roadmap.md`](docs/06-roadmap.md); the results template is [`docs/08-api-probe-results.md`](docs/08-api-probe-results.md).
 
