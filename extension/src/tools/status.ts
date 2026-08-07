@@ -15,6 +15,7 @@ import { avenue } from "../avenue/client.js";
 import { AvenueError } from "../avenue/errors.js";
 import { CAPABILITY_KEYS, capability, originPattern } from "../institutions.js";
 import { getApiKey, getCurrentInstitution, hasHostPermission } from "../settings.js";
+import { indexStatus } from "./materials.js";
 
 export async function getStatus() {
   const inst = await getCurrentInstitution();
@@ -34,6 +35,8 @@ export async function getStatus() {
     }
   }
 
+  const index = await indexStatus();
+
   const advice: string[] = [];
   if (!granted) {
     advice.push(
@@ -47,6 +50,11 @@ export async function getStatus() {
   if (!(await getApiKey())) {
     advice.push("No API key is set, so questions cannot be answered yet. Add one in the side panel.");
   }
+  if (!index.documents) {
+    advice.push(
+      "No course files are indexed, so search_course_materials has nothing to search. Run sync_course_materials for a course.",
+    );
+  }
   if (!advice.length) advice.push("Everything is connected.");
 
   return {
@@ -59,6 +67,7 @@ export async function getStatus() {
     },
     session: { signed_in: signedIn, detail: signInDetail },
     api_key_set: (await getApiKey()) !== null,
+    index,
     // What a probe MEASURED on this instance — "unverified" where nobody has
     // looked. Never generalize one school's results to another.
     known_restrictions: Object.fromEntries(

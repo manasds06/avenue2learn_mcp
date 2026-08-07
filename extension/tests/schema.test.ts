@@ -108,3 +108,38 @@ describe("the shapes that would silently break a call", () => {
     expect(decl.parameters!.required).toBeUndefined();
   });
 });
+
+describe("RAG tools declare where they can run", () => {
+  it("puts the file tools in the panel, not the service worker", async () => {
+    const { PANEL_TOOLS } = await import("../src/tools/registry.js");
+    // These need DOMParser (OOXML/HTML), a pdf.js worker, or minutes of
+    // runtime. A service worker has none of those and MV3 kills it at ~30s.
+    for (const name of [
+      "sync_course_materials",
+      "search_course_materials",
+      "read_content_file",
+      "get_page_image",
+    ]) {
+      expect(PANEL_TOOLS.has(name), name).toBe(true);
+    }
+  });
+
+  it("leaves the live-data tools in the worker", async () => {
+    const { PANEL_TOOLS } = await import("../src/tools/registry.js");
+    for (const name of ["list_courses", "get_upcoming_deadlines", "get_grades"]) {
+      expect(PANEL_TOOLS.has(name), name).toBe(false);
+    }
+  });
+
+  it("the worker does not statically import the extraction stack", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+    const src = readFileSync(join(root, "src/background/worker.ts"), "utf8");
+
+    // A static `import ... from "../tools/registry.js"` pulls in rag/extract.ts
+    // at load time, whose DOMParser usage makes the whole worker unloadable.
+    expect(src).not.toMatch(/^import .*tools\/registry/m);
+    expect(src).toContain('await import("../tools/registry.js")');
+  });
+});

@@ -18,6 +18,12 @@ import { getCourseContent } from "./content.js";
 import { listCourses } from "./courses.js";
 import { listDiscussions, readDiscussionThread } from "./discussions.js";
 import { analyzeGradeSummary, getGrades } from "./grades.js";
+import {
+  getPageImage,
+  readContentFile,
+  searchCourseMaterials,
+  syncCourseMaterials,
+} from "./materials.js";
 import { listQuizzes } from "./quizzes.js";
 import { getStatus } from "./status.js";
 
@@ -32,7 +38,25 @@ export interface ToolDef {
   description: string;
   parameters: JsonSchema;
   handler: (args: Record<string, unknown>) => Promise<unknown>;
+  /**
+   * Where the handler can actually execute.
+   *
+   * "worker" is the default: fetch + JSON reshaping, which a service worker
+   * does fine. The file tools need DOMParser (OOXML/HTML) and a pdf.js worker,
+   * neither of which exists in a service worker — and a first sync runs for
+   * minutes, which MV3 would kill. Those run in the panel.
+   */
+  runsIn?: "worker" | "panel";
 }
+
+/** Tools that must run in the side panel rather than the service worker. */
+export const PANEL_TOOLS = new Set([
+  "sync_course_materials",
+  "search_course_materials",
+  "read_content_file",
+  "get_page_image",
+  "get_status",
+]);
 
 const ORG_UNIT: JsonSchema["properties"] = {
   org_unit_id: {
@@ -216,6 +240,83 @@ export const TOOLS: ToolDef[] = [
     handler: (a) => getClassList(a as never),
   },
   {
+    name: "search_course_materials",
+    description:
+      "Semantic + keyword search across the user's INDEXED course files — outlines, slide decks, assignment specs, readings. Returns matching passages WITH CITATIONS (course, file, page or slide). Read-only. " +
+      "This is the right tool for any question whose answer is INSIDE a course file: 'what's the late penalty?', 'what are the assignment weights?', 'which lecture covered red-black trees?'. " +
+      "Prefer it over read_content_file when you do not already know which file holds the answer — it searches everything at once instead of opening files one by one. " +
+      "Requires sync_course_materials to have run for that course. If indexed_courses is empty, NOTHING has been indexed: say so, and do not conclude the material fails to mention what was asked.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "A natural-language question." },
+        org_unit_id: {
+          type: "integer",
+          description: "Restrict to one course. Omit to search everything indexed.",
+        },
+        top_k: { type: "integer", description: "Passages to return. Defaults to 8." },
+      },
+      required: ["query"],
+    },
+    handler: (a) => searchCourseMaterials(a as never),
+  },
+  {
+    name: "sync_course_materials",
+    description:
+      "Download and index one course's files so search_course_materials can search them. Writes only to a LOCAL index — it changes nothing on Brightspace. " +
+      "Run once per course, then again when new material is posted. Incremental: unchanged files are skipped. " +
+      "The first run on a large course takes minutes and downloads a lot, so do ONE course at a time and only when the user asks for it. Never call this speculatively to rescue an empty search.",
+    parameters: {
+      type: "object",
+      properties: {
+        ...ORG_UNIT,
+        force: {
+          type: "boolean",
+          description: "Re-index everything even if unchanged. Defaults to false.",
+        },
+      },
+      required: ["org_unit_id"],
+    },
+    handler: (a) => syncCourseMaterials(a as never),
+  },
+  {
+    name: "read_content_file",
+    description:
+      "Return the extracted text of ONE course file (PDF, PPTX, DOCX, HTML, TXT). Read-only. " +
+      "Use when you know WHICH file you need — get topic_id from get_course_content or from a search citation. " +
+      "If you are hunting for something and do not know the file, use search_course_materials instead; paginating through a deck is slow and burns context. " +
+      "Check truncated: when true, continue with next_start_page. If extraction_quality is 'poor' the file is scanned images — say so, and consider get_page_image.",
+    parameters: {
+      type: "object",
+      properties: {
+        ...ORG_UNIT,
+        topic_id: { type: "integer", description: "From get_course_content or a citation." },
+        max_chars: { type: "integer", description: "Defaults to 12000." },
+        start_page: { type: "integer", description: "Page/slide to resume from. Defaults to 1." },
+      },
+      required: ["org_unit_id", "topic_id"],
+    },
+    handler: (a) => readContentFile(a as never),
+  },
+  {
+    name: "get_page_image",
+    description:
+      "Render one page of a PDF as an image so it can actually be looked at. Read-only. " +
+      "Use when the answer is VISUAL — a diagram, a graph, a circuit, a worked derivation, a table whose layout matters. Text extraction gets the words on a page but loses the figure entirely. " +
+      "Prefer read_content_file for prose: images cost far more context than text. One page per call; page numbers are 1-indexed and often come straight from a search citation.",
+    parameters: {
+      type: "object",
+      properties: {
+        ...ORG_UNIT,
+        topic_id: { type: "integer", description: "From get_course_content or a citation." },
+        page: { type: "integer", description: "1-indexed page number." },
+        dpi: { type: "integer", description: "Render resolution. Defaults to 150." },
+      },
+      required: ["org_unit_id", "topic_id", "page"],
+    },
+    handler: (a) => getPageImage(a as never),
+  },
+  {
     name: "get_status",
     description:
       "Report whether the user is signed in, which school is selected, and what this extension can reach. Read-only. " +
@@ -224,6 +325,11 @@ export const TOOLS: ToolDef[] = [
     handler: () => getStatus(),
   },
 ];
+
+export const TOOLS_WITH_PLACEMENT = TOOLS.map((t) => ({
+  ...t,
+  runsIn: (PANEL_TOOLS.has(t.name) ? "panel" : "worker") as "panel" | "worker",
+}));
 
 export const TOOLS_BY_NAME: Record<string, ToolDef> = Object.fromEntries(
   TOOLS.map((t) => [t.name, t]),

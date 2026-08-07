@@ -60,9 +60,36 @@ describe("hosts are declared narrowly and granted per school", () => {
     );
   });
 
-  it("offers exactly the school hosts the registry knows about", async () => {
+  it("offers every school host the registry knows about", async () => {
     const { allOriginPatterns } = await import("../src/institutions.js");
-    expect(new Set(manifest.optional_host_permissions)).toEqual(new Set(allOriginPatterns()));
+    const offered = new Set<string>(manifest.optional_host_permissions);
+    for (const pattern of allOriginPatterns()) {
+      expect(offered, `${pattern} is in the registry but not offered`).toContain(pattern);
+    }
+  });
+
+  it("offers exactly one non-school host, for the search model", async () => {
+    const { allOriginPatterns } = await import("../src/institutions.js");
+    const { MODEL_ORIGINS } = await import("../src/rag/embed.js");
+
+    const schools = new Set(allOriginPatterns());
+    const extra = (manifest.optional_host_permissions as string[]).filter(
+      (h) => !schools.has(h),
+    );
+
+    // HuggingFace serves the embedding model's weights (~30MB, once). This is
+    // a DELIBERATE exception to "we only talk to your school and Google":
+    // bundling the weights would add 30MB to every extension update, so they
+    // are fetched instead — and only after the user allows it, as part of a
+    // sync they started. Nothing is UPLOADED there; the model comes to the
+    // files, not the other way round.
+    expect(new Set(extra)).toEqual(new Set(MODEL_ORIGINS));
+  });
+
+  it("keeps the model host optional, never required", () => {
+    // A student who never indexes a course should never be asked for it.
+    const required: string[] = manifest.host_permissions ?? [];
+    expect(required.some((h) => h.includes("huggingface"))).toBe(false);
   });
 
   it("has no server of ours in either list", () => {

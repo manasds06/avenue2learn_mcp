@@ -11,6 +11,7 @@
  * `chrome.permissions.request()` from a user gesture.
  */
 
+import { AvenueError } from "../avenue/errors.js";
 import { INSTITUTIONS, type Institution, originPattern } from "../institutions.js";
 import { ask, type CallTool, type ToolTrace } from "../llm/gemini.js";
 import {
@@ -22,7 +23,9 @@ import {
   setApiKey,
   setInstitutionId,
 } from "../settings.js";
-import { TOOLS, TOOLS_BY_NAME } from "../tools/registry.js";
+import { hasModelPermission, requestModelPermission } from "../rag/embed.js";
+import { setSyncProgressSink } from "../tools/materials.js";
+import { PANEL_TOOLS, TOOLS, TOOLS_BY_NAME } from "../tools/registry.js";
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -39,6 +42,9 @@ const toolSelect = $<HTMLSelectElement>("tool");
 const toolDesc = $<HTMLParagraphElement>("tool-desc");
 const argsBox = $<HTMLTextAreaElement>("args");
 const runBtn = $<HTMLButtonElement>("run");
+const modelRow = $<HTMLDivElement>("model-row");
+const modelHint = $<HTMLParagraphElement>("model-hint");
+const allowModelBtn = $<HTMLButtonElement>("allow-model");
 const thread = $<HTMLDivElement>("thread");
 const composer = $<HTMLFormElement>("composer");
 const question = $<HTMLTextAreaElement>("question");
@@ -47,9 +53,36 @@ const sendBtn = $<HTMLButtonElement>("send");
 let lastOrgUnitId: number | null = null;
 let busy = false;
 
-/** Tools are only reachable from the worker, which owns all network access. */
-const callTool: CallTool = (name, args) =>
-  chrome.runtime.sendMessage({ type: "tool", name, args });
+/**
+ * Dispatch a tool to wherever it can actually run.
+ *
+ * Live-data tools go to the service worker, which owns Brightspace access.
+ * The file tools run HERE: they need DOMParser and a pdf.js worker, which a
+ * service worker does not have, and a sync runs for minutes — longer than
+ * MV3 will keep a worker alive.
+ */
+const callTool: CallTool = async (name, args) => {
+  if (!PANEL_TOOLS.has(name)) {
+    return chrome.runtime.sendMessage({ type: "tool", name, args });
+  }
+
+  const tool = TOOLS_BY_NAME[name];
+  if (!tool) {
+    return { ok: false, error: "UnknownTool", message: `No tool named ${name}.` };
+  }
+  try {
+    return { ok: true, result: await tool.handler(args) };
+  } catch (err) {
+    if (err instanceof AvenueError) return { ok: false, ...err.toResult() };
+    console.error("panel tool failed", name, err);
+    return {
+      ok: false,
+      error: "Unexpected",
+      message: err instanceof Error ? err.message : String(err),
+      next_step: "Check the side panel console for a traceback.",
+    };
+  }
+};
 
 // --- thread rendering -------------------------------------------------------
 
@@ -125,6 +158,8 @@ async function submitQuestion(text: string): Promise<void> {
     // A missing grant is recoverable right here.
     await refreshGrantState();
   } finally {
+    progressBubble?.remove();
+    progressBubble = null;
     busy = false;
     sendBtn.disabled = false;
     question.focus();
@@ -212,6 +247,39 @@ grantBtn.addEventListener("click", async () => {
   await refreshGrantState();
 });
 
+async function refreshModelState(): Promise<void> {
+  const granted = await hasModelPermission();
+  modelRow.hidden = granted;
+  if (!granted) {
+    modelHint.textContent =
+      "Searching inside course files uses a small language model that runs in " +
+      "your browser. Downloading it (~30 MB, once) needs one-time access to " +
+      "huggingface.co. Your course files are never uploaded — the model comes " +
+      "to them.";
+  }
+}
+
+allowModelBtn.addEventListener("click", async () => {
+  if (!(await requestModelPermission())) {
+    bubble("err").textContent =
+      "Model download not allowed, so file search will fall back to keyword matching only.";
+    return;
+  }
+  await refreshModelState();
+});
+
+/**
+ * A first sync takes minutes. Reporting progress in one reusable bubble beats
+ * a silent panel that looks hung.
+ */
+let progressBubble: HTMLDivElement | null = null;
+setSyncProgressSink((p) => {
+  if (!progressBubble) progressBubble = bubble("info");
+  const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+  progressBubble.textContent = `${p.phase} — ${p.done}/${p.total} (${pct}%)`;
+  thread.scrollTop = thread.scrollHeight;
+});
+
 // --- direct tool runner (debugging) -----------------------------------------
 
 function templateFor(name: string): string {
@@ -287,4 +355,5 @@ toolSelect.value = "list_courses";
 syncToolUi();
 await refreshGrantState();
 await refreshKeyState();
+await refreshModelState();
 question.focus();

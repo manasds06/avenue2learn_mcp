@@ -2,10 +2,11 @@
   "manifest_version": 3,
   "name": "Brightspace Assistant",
   "version": "0.1.0",
-  "description": "Ask about your university's Brightspace courses — deadlines, grades, announcements — answered from your real course data.",
+  "description": "Ask about your university's Brightspace courses — deadlines, grades, announcements, and what's actually in your course files.",
 
   "permissions": [
     "storage",
+    "unlimitedStorage",
     "sidePanel"
   ],
 
@@ -16,8 +17,15 @@
   "optional_host_permissions": [
     "https://avenue.cllmcmaster.ca/*",
     "https://avenue.mcmaster.ca/*",
-    "https://brightspace.carleton.ca/*"
+    "https://brightspace.carleton.ca/*",
+    "https://huggingface.co/*",
+    "https://cdn-lfs.huggingface.co/*",
+    "https://cdn-lfs-us-1.huggingface.co/*"
   ],
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
 
   "background": {
     "service_worker": "background/worker.js",
