@@ -1,17 +1,18 @@
 /**
- * Checkpoint UI: set up a school and key, then run any tool by hand.
+ * The side panel: chat, setup, and a direct tool runner for debugging.
  *
- * This exists to exercise all twelve tools before the Gemini loop can call
- * them, and to keep a way of reproducing a bad answer afterwards. The chat
- * panel replaces the runner below; the setup block stays.
+ * The Gemini loop runs HERE rather than in the service worker. MV3 kills a
+ * worker after ~30s idle, and a multi-round tool conversation is exactly the
+ * shape that trips over; a panel page lives as long as it is open. The panel
+ * calls tools by messaging the worker, which keeps all Brightspace access in
+ * one place.
  *
- * The permission request MUST happen here rather than in the service worker.
- * Chrome only honours `chrome.permissions.request()` from a user gesture, so a
- * click is required — which is also the honest UX: the user is told which site
- * is about to be accessed, and agrees to it.
+ * The permission request also has to live here: Chrome only honours
+ * `chrome.permissions.request()` from a user gesture.
  */
 
 import { INSTITUTIONS, type Institution, originPattern } from "../institutions.js";
+import { ask, type CallTool, type ToolTrace } from "../llm/gemini.js";
 import {
   clearApiKey,
   getApiKey,
@@ -23,70 +24,162 @@ import {
 } from "../settings.js";
 import { TOOLS, TOOLS_BY_NAME } from "../tools/registry.js";
 
-const school = document.getElementById("school") as HTMLSelectElement;
-const grantRow = document.getElementById("grant-row") as HTMLDivElement;
-const grantHint = document.getElementById("grant-hint") as HTMLParagraphElement;
-const grantBtn = document.getElementById("grant") as HTMLButtonElement;
-const apiKeyInput = document.getElementById("apikey") as HTMLInputElement;
-const saveKeyBtn = document.getElementById("save-key") as HTMLButtonElement;
-const keyHint = document.getElementById("key-hint") as HTMLParagraphElement;
-const toolSelect = document.getElementById("tool") as HTMLSelectElement;
-const toolDesc = document.getElementById("tool-desc") as HTMLParagraphElement;
-const argsBox = document.getElementById("args") as HTMLTextAreaElement;
-const runBtn = document.getElementById("run") as HTMLButtonElement;
-const statusEl = document.getElementById("status") as HTMLDivElement;
-const out = document.getElementById("out") as HTMLPreElement;
+const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
-type ToolResponse =
-  | { ok: true; result: unknown }
-  | { ok: false; error: string; message: string; next_step?: string };
+const setupPanel = $<HTMLElement>("setup");
+const toggleSetup = $<HTMLButtonElement>("toggle-setup");
+const school = $<HTMLSelectElement>("school");
+const grantRow = $<HTMLDivElement>("grant-row");
+const grantHint = $<HTMLParagraphElement>("grant-hint");
+const grantBtn = $<HTMLButtonElement>("grant");
+const apiKeyInput = $<HTMLInputElement>("apikey");
+const saveKeyBtn = $<HTMLButtonElement>("save-key");
+const keyHint = $<HTMLParagraphElement>("key-hint");
+const toolSelect = $<HTMLSelectElement>("tool");
+const toolDesc = $<HTMLParagraphElement>("tool-desc");
+const argsBox = $<HTMLTextAreaElement>("args");
+const runBtn = $<HTMLButtonElement>("run");
+const thread = $<HTMLDivElement>("thread");
+const composer = $<HTMLFormElement>("composer");
+const question = $<HTMLTextAreaElement>("question");
+const sendBtn = $<HTMLButtonElement>("send");
 
-/** Remembered from the last list_courses so course-scoped tools prefill. */
 let lastOrgUnitId: number | null = null;
+let busy = false;
 
-function say(text: string, kind: "" | "ok" | "err" = ""): void {
-  statusEl.className = kind;
-  statusEl.textContent = text;
+/** Tools are only reachable from the worker, which owns all network access. */
+const callTool: CallTool = (name, args) =>
+  chrome.runtime.sendMessage({ type: "tool", name, args });
+
+// --- thread rendering -------------------------------------------------------
+
+function bubble(kind: "you" | "bot" | "err" | "info"): HTMLDivElement {
+  const el = document.createElement("div");
+  el.className = `msg ${kind}`;
+  thread.append(el);
+  thread.scrollTop = thread.scrollHeight;
+  return el;
 }
 
+/** Minimal formatting: paragraphs and bullets, no markdown renderer. */
+function renderText(el: HTMLElement, text: string): void {
+  el.replaceChildren();
+  for (const block of text.split(/\n{2,}/)) {
+    const lines = block.split("\n").filter(Boolean);
+    const bulleted = lines.length > 0 && lines.every((l) => /^\s*[-*•]\s+/.test(l));
+    if (bulleted) {
+      const ul = document.createElement("ul");
+      for (const line of lines) {
+        const li = document.createElement("li");
+        li.textContent = line.replace(/^\s*[-*•]\s+/, "");
+        ul.append(li);
+      }
+      el.append(ul);
+    } else {
+      const p = document.createElement("p");
+      p.textContent = lines.join(" ");
+      el.append(p);
+    }
+  }
+}
+
+function renderTrace(el: HTMLElement, trace: ToolTrace[]): void {
+  if (!trace.length) return;
+  const details = document.createElement("details");
+  details.className = "trace";
+  const summary = document.createElement("summary");
+  summary.textContent = `${trace.length} tool call${trace.length === 1 ? "" : "s"}`;
+  details.append(summary);
+  for (const t of trace) {
+    const line = document.createElement("div");
+    line.className = t.ok ? "trace-ok" : "trace-err";
+    line.textContent = `${t.ok ? "✓" : "✕"} ${t.name} — ${t.summary}`;
+    details.append(line);
+  }
+  el.append(details);
+}
+
+// --- asking -----------------------------------------------------------------
+
+async function submitQuestion(text: string): Promise<void> {
+  if (busy || !text.trim()) return;
+  busy = true;
+  sendBtn.disabled = true;
+
+  renderText(bubble("you"), text);
+  question.value = "";
+
+  const pending = bubble("info");
+  pending.textContent = "Thinking…";
+
+  try {
+    const result = await ask(text, callTool);
+    pending.remove();
+    const answer = bubble("bot");
+    renderText(answer, result.text);
+    renderTrace(answer, result.trace);
+  } catch (err) {
+    pending.remove();
+    const failed = bubble("err");
+    failed.textContent = err instanceof Error ? err.message : String(err);
+    // A missing grant is recoverable right here.
+    await refreshGrantState();
+  } finally {
+    busy = false;
+    sendBtn.disabled = false;
+    question.focus();
+  }
+}
+
+composer.addEventListener("submit", (e) => {
+  e.preventDefault();
+  void submitQuestion(question.value);
+});
+
+question.addEventListener("keydown", (e) => {
+  // Enter sends, Shift+Enter makes a newline — the convention people expect.
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    void submitQuestion(question.value);
+  }
+});
+
 // --- setup ------------------------------------------------------------------
+
+toggleSetup.addEventListener("click", () => {
+  setupPanel.hidden = !setupPanel.hidden;
+});
 
 async function refreshGrantState(): Promise<Institution> {
   const inst = await getCurrentInstitution();
   const granted = await hasHostPermission(inst);
 
   grantRow.hidden = granted;
-  runBtn.disabled = !granted;
-
   if (!granted) {
+    setupPanel.hidden = false;
     grantHint.textContent =
       `To read your courses, this extension needs access to ${inst.lmsName} ` +
-      `(${originPattern(inst)}). Nothing is sent anywhere — the request happens ` +
-      `in your browser, using the session you already have.`;
+      `(${originPattern(inst)}). The request happens in your browser, using the ` +
+      `session you already have.`;
   }
   return inst;
 }
 
-/**
- * The key never leaves this machine: chrome.storage.local, read only when
- * calling Gemini directly. Never echoed back once saved — redisplaying a
- * stored secret invites shoulder-surfing for no benefit.
- */
 async function refreshKeyState(): Promise<void> {
   const key = await getApiKey();
   if (key) {
     apiKeyInput.value = "";
     apiKeyInput.placeholder = `saved (${key.slice(0, 4)}…${key.slice(-4)})`;
     saveKeyBtn.textContent = "Replace";
-    keyHint.textContent =
-      "Stored in this browser only. Clear the field and press Replace to remove it.";
+    keyHint.textContent = "Stored in this browser only. Clear the field and press Replace to remove.";
   } else {
     apiKeyInput.placeholder = "AIza…";
     saveKeyBtn.textContent = "Save";
     keyHint.innerHTML =
-      "Not needed to run tools below — only for the chat loop. Free key at " +
+      "Needed to ask questions. Free key at " +
       '<a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">' +
-      "aistudio.google.com/apikey</a>.";
+      "aistudio.google.com/apikey</a>. Stored in this browser only.";
+    setupPanel.hidden = false;
   }
 }
 
@@ -94,14 +187,13 @@ saveKeyBtn.addEventListener("click", async () => {
   const entered = apiKeyInput.value.trim();
   if (!entered) {
     await clearApiKey();
-    say("API key removed.", "ok");
   } else if (!/^AIza[\w-]{10,}$/.test(entered)) {
     // Catch obvious paste mistakes here rather than as an opaque 400 later.
-    say('That does not look like a Gemini API key — they start with "AIza".', "err");
+    bubble("err").textContent = 'That does not look like a Gemini API key — they start with "AIza".';
     return;
   } else {
     await setApiKey(entered);
-    say("API key saved to this browser.", "ok");
+    bubble("info").textContent = "API key saved to this browser.";
   }
   apiKeyInput.value = "";
   await refreshKeyState();
@@ -111,37 +203,30 @@ apiKeyInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") saveKeyBtn.click();
 });
 
-// --- tool runner ------------------------------------------------------------
+grantBtn.addEventListener("click", async () => {
+  const inst = await getCurrentInstitution();
+  if (!(await requestHostPermission(inst))) {
+    bubble("err").textContent = `Access to ${inst.lmsName} was not granted, so no course data can be read.`;
+    return;
+  }
+  await refreshGrantState();
+});
 
-/** A starting point built from the schema, not a guess at what you want. */
+// --- direct tool runner (debugging) -----------------------------------------
+
 function templateFor(name: string): string {
   const tool = TOOLS_BY_NAME[name];
   if (!tool) return "{}";
   const args: Record<string, unknown> = {};
   for (const key of tool.parameters.required ?? []) {
-    args[key] =
-      key === "org_unit_id" ? (lastOrgUnitId ?? 0) : key.endsWith("_id") ? 0 : "";
+    args[key] = key === "org_unit_id" ? (lastOrgUnitId ?? 0) : key.endsWith("_id") ? 0 : "";
   }
-  return JSON.stringify(args, null, 2);
+  return JSON.stringify(args);
 }
 
 function syncToolUi(): void {
-  const tool = TOOLS_BY_NAME[toolSelect.value];
-  toolDesc.textContent = tool?.description ?? "";
+  toolDesc.textContent = TOOLS_BY_NAME[toolSelect.value]?.description ?? "";
   argsBox.value = templateFor(toolSelect.value);
-  const optional = Object.keys(tool?.parameters.properties ?? {}).filter(
-    (k) => !(tool?.parameters.required ?? []).includes(k),
-  );
-  if (optional.length) {
-    argsBox.placeholder = `optional: ${optional.join(", ")}`;
-  }
-}
-
-for (const t of TOOLS) {
-  const opt = document.createElement("option");
-  opt.value = t.name;
-  opt.textContent = t.name;
-  toolSelect.append(opt);
 }
 
 runBtn.addEventListener("click", async () => {
@@ -149,38 +234,29 @@ runBtn.addEventListener("click", async () => {
   try {
     args = argsBox.value.trim() ? JSON.parse(argsBox.value) : {};
   } catch (err) {
-    say(`Arguments are not valid JSON.\n\n${String(err)}`, "err");
+    bubble("err").textContent = `Arguments are not valid JSON. ${String(err)}`;
     return;
   }
 
   const name = toolSelect.value;
-  runBtn.disabled = true;
-  say(`Running ${name}…`);
-  out.textContent = "";
-  const started = performance.now();
+  const out = bubble("info");
+  out.textContent = `Running ${name}…`;
 
-  try {
-    const resp: ToolResponse = await chrome.runtime.sendMessage({ type: "tool", name, args });
-    const ms = Math.round(performance.now() - started);
-
-    if (resp.ok) {
-      say(`${name} succeeded in ${ms} ms.`, "ok");
-      out.textContent = JSON.stringify(resp.result, null, 2);
-
-      // Remember a course id so the course-scoped tools prefill usefully.
-      const result = resp.result as { courses?: Array<{ org_unit_id: number }> };
-      if (result?.courses?.length) lastOrgUnitId = result.courses[0]!.org_unit_id;
-    } else {
-      // A typed failure is a RESULT, not a crash — several of these are the
-      // correct answer (a restricted route, a signed-out session).
-      say([`${name}: ${resp.error}`, resp.message, resp.next_step].filter(Boolean).join("\n\n"), "err");
-      if (resp.error === "HostNotGranted") await refreshGrantState();
-    }
-  } catch (err) {
-    say(`Could not reach the service worker.\n\n${String(err)}`, "err");
-  } finally {
-    runBtn.disabled = false;
+  const resp = await callTool(name, args);
+  const pre = document.createElement("pre");
+  if (resp.ok) {
+    out.textContent = `${name} ✓`;
+    pre.textContent = JSON.stringify(resp.result, null, 2);
+    const r = resp.result as { courses?: Array<{ org_unit_id: number }> };
+    if (r?.courses?.length) lastOrgUnitId = r.courses[0]!.org_unit_id;
+  } else {
+    // A typed failure is a RESULT: for several tools a PermissionDenied is the
+    // correct answer on this instance.
+    out.textContent = `${name} — ${resp.error}`;
+    pre.textContent = [resp.message, resp.next_step].filter(Boolean).join("\n\n");
   }
+  out.append(pre);
+  thread.scrollTop = thread.scrollHeight;
 });
 
 toolSelect.addEventListener("change", syncToolUi);
@@ -193,23 +269,17 @@ for (const inst of Object.values(INSTITUTIONS)) {
   opt.textContent = `${inst.lmsName} — ${inst.orgName}`;
   school.append(opt);
 }
+for (const t of TOOLS) {
+  const opt = document.createElement("option");
+  opt.value = t.name;
+  opt.textContent = t.name;
+  toolSelect.append(opt);
+}
 
 school.value = (await getCurrentInstitution()).id;
 school.addEventListener("change", async () => {
   await setInstitutionId(school.value);
   lastOrgUnitId = null;
-  out.textContent = "";
-  say("");
-  await refreshGrantState();
-});
-
-grantBtn.addEventListener("click", async () => {
-  const inst = await getCurrentInstitution();
-  if (!(await requestHostPermission(inst))) {
-    say(`Access to ${inst.lmsName} was not granted, so no course data can be read.`, "err");
-    return;
-  }
-  say("");
   await refreshGrantState();
 });
 
@@ -217,3 +287,4 @@ toolSelect.value = "list_courses";
 syncToolUi();
 await refreshGrantState();
 await refreshKeyState();
+question.focus();

@@ -8,44 +8,44 @@
   <body>
     <header>
       <h1>Brightspace Assistant</h1>
-      <p class="sub">Checkpoint build — tools work, the chat loop is next.</p>
+      <button id="toggle-setup" type="button" class="link">Setup</button>
     </header>
 
-    <main>
-      <details id="setup" open>
-        <summary>Setup</summary>
+    <section id="setup" hidden>
+      <label for="school">Your school</label>
+      <select id="school"></select>
 
-        <label for="school">Your school</label>
-        <select id="school"></select>
+      <div id="grant-row" hidden>
+        <p class="hint" id="grant-hint"></p>
+        <button id="grant" type="button">Allow access</button>
+      </div>
 
-        <div id="grant-row" hidden>
-          <p class="hint" id="grant-hint"></p>
-          <button id="grant" type="button">Allow access</button>
-        </div>
+      <label for="apikey">Gemini API key</label>
+      <div class="key-row">
+        <input id="apikey" type="password" autocomplete="off" spellcheck="false"
+               placeholder="AIza…" />
+        <button id="save-key" type="button" class="secondary">Save</button>
+      </div>
+      <p class="hint" id="key-hint"></p>
 
-        <label for="apikey">Gemini API key</label>
-        <div class="key-row">
-          <input id="apikey" type="password" autocomplete="off" spellcheck="false"
-                 placeholder="AIza…" />
-          <button id="save-key" type="button" class="secondary">Save</button>
-        </div>
-        <p class="hint" id="key-hint"></p>
+      <details id="devtools">
+        <summary>Run a tool directly</summary>
+        <label for="tool">Tool</label>
+        <select id="tool"></select>
+        <p class="hint" id="tool-desc"></p>
+        <label for="args">Arguments (JSON)</label>
+        <textarea id="args" rows="3" spellcheck="false"></textarea>
+        <button id="run" type="button" class="secondary">Run tool</button>
       </details>
+    </section>
 
-      <hr />
+    <div id="thread" aria-live="polite"></div>
 
-      <label for="tool">Tool</label>
-      <select id="tool"></select>
-      <p class="hint" id="tool-desc"></p>
-
-      <label for="args">Arguments (JSON)</label>
-      <textarea id="args" rows="4" spellcheck="false"></textarea>
-
-      <button id="run" type="button">Run tool</button>
-
-      <div id="status" role="status"></div>
-      <pre id="out"></pre>
-    </main>
+    <form id="composer">
+      <textarea id="question" rows="2" spellcheck="false"
+                placeholder="What's due in the next two weeks?"></textarea>
+      <button id="send" type="submit">Ask</button>
+    </form>
 
     <script type="module" src="sidepanel.js"></script>
   </body>
