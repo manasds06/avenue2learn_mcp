@@ -430,3 +430,91 @@ class TestQuizAttemptStatusIsNotAsserted:
         assert out["attempt_status_available"] is True
         assert out["quizzes"][0]["status"] == "attempted"
         assert out["quizzes"][0]["attempts_used"] == 1
+
+
+class TestDeadlineViewSurvivesBlockedSubmissions:
+    """The `_Unavailable` sentinel is a truthy object.
+
+    In _enrich_with_assignments the status was `"submitted" if sub else
+    "not_submitted"`, so once mysubmissions started returning the sentinel
+    every item became "submitted" -- and because include_submitted defaults to
+    False, they were then filtered out. A blocked route would have silently
+    emptied "what's due this week", which is the product's main question.
+    """
+
+    @staticmethod
+    def _handler(deny_submissions: bool):
+        from datetime import datetime, timedelta, timezone
+
+        soon = (datetime.now(timezone.utc) + timedelta(days=3)).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z"
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            p = request.url.path
+            if p == "/d2l/api/versions/":
+                return _json(
+                    [
+                        {"ProductCode": "lp", "LatestVersion": "1.62"},
+                        {"ProductCode": "le", "LatestVersion": "1.96"},
+                    ]
+                )
+            if "myenrollments" in p:
+                return _json(
+                    [
+                        {
+                            "OrgUnit": {"Id": 111, "Name": "SFWRENG 2DA4",
+                                        "Type": {"Name": "Course Offering"}},
+                            "Access": {"IsActive": True, "CanAccess": True},
+                        }
+                    ]
+                )
+            if "mysubmissions" in p:
+                if deny_submissions:
+                    return httpx.Response(
+                        403,
+                        content='{"Errors":[{"Message":"Not authorized"}]}',
+                        headers={"content-type": "application/json"},
+                    )
+                return _json([])
+            if p.endswith("/dropbox/folders/"):
+                return _json([{"Id": 7, "Name": "Assignment 3", "DueDate": soon}])
+            if "calendar/events/myEvents" in p:
+                return _json([{"Title": "Assignment 3", "EndDateTime": soon}])
+            return _json([])
+
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_blocked_submissions_does_not_empty_the_view(
+        self, tmp_path, monkeypatch
+    ):
+        ctx = _ctx_with(self._handler(deny_submissions=True), tmp_path, monkeypatch)
+        try:
+            from avenue_mcp.tools.assignments import get_upcoming_deadlines
+
+            out = await get_upcoming_deadlines(ctx, days_ahead=14, include_submitted=False)
+        finally:
+            await ctx.aclose()
+
+        assert out["count"] > 0, (
+            "a blocked submissions route must not filter every deadline away"
+        )
+        assert all(d["submission_status"] == "unknown" for d in out["deadlines"])
+        assert out["submission_status_available"] is False
+        assert out["note"], "must explain why status is missing"
+
+    @pytest.mark.asyncio
+    async def test_working_submissions_still_reports_availability(
+        self, tmp_path, monkeypatch
+    ):
+        ctx = _ctx_with(self._handler(deny_submissions=False), tmp_path, monkeypatch)
+        try:
+            from avenue_mcp.tools.assignments import get_upcoming_deadlines
+
+            out = await get_upcoming_deadlines(ctx, days_ahead=14, include_submitted=False)
+        finally:
+            await ctx.aclose()
+
+        assert out["submission_status_available"] is True
+        assert all(d["submission_status"] != "unknown" for d in out["deadlines"])

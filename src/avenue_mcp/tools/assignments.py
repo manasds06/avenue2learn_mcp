@@ -348,7 +348,6 @@ async def _enrich_with_assignments(
             folders = await ctx.client.get_paged("le", f"{oid}/dropbox/folders/")
         except APIError:
             continue
-        any_status = True
         records: list[dict[str, Any]] = []
         for folder in folders:
             if not isinstance(folder, dict):
@@ -357,12 +356,31 @@ async def _enrich_with_assignments(
             due = parse_d2l(m.pick(folder, "DueDate", "Due"))
             if fid is None or not within_window(due, days_ahead, ref):
                 continue
+
             sub = await _my_submission(ctx, oid, fid)
+            # THREE outcomes, not two. `_Unavailable` is a truthy object, so a
+            # bare `"submitted" if sub else ...` marks every item submitted the
+            # moment the route is denied -- and since include_submitted is
+            # False by default, they then vanish from "what's due". Silence
+            # would delete the answer.
+            if isinstance(sub, _Unavailable):
+                status = "unknown"
+            elif sub is not None:
+                status = "submitted"
+            else:
+                status = "not_submitted"
+
+            # Only claim status is available once a submissions read actually
+            # succeeded. Setting this on the FOLDER read succeeding reported
+            # submission_status_available: True while every status was unknown.
+            if status != "unknown":
+                any_status = True
+
             records.append(
                 {
                     "title": str(m.pick(folder, "Name", "Title", default="") or ""),
                     "due_utc": to_utc_iso(due),
-                    "status": "submitted" if sub else "not_submitted",
+                    "status": status,
                     "points_possible": m.as_float(m.pick(folder, "OutOf", "PointsPossible")),
                     "folder_id": fid,
                 }
