@@ -1,26 +1,36 @@
-# --- Credentials and session state -------------------------------------
-# session.json is equivalent to a logged-in Avenue session. Never commit it.
+# ---- Credentials and local state (NEVER commit) ----
+# The session file is equivalent to a logged-in Avenue session.
 .avenue-mcp/
 session.json
 *.session.json
 storage_state.json
 
-# --- Probe output: raw API responses, unredacted -----------------------
-tests/fixtures/
-scripts/probe-output/
+# Downloaded course material (instructor IP) and the local index
+cache/
+index.db
+index.db-*
+vectors.npy
 
-# --- Python ------------------------------------------------------------
+# Probe output may contain PII / real IDs
+tests/fixtures/
+docs/probe-raw/
+
+# ---- Python ----
 __pycache__/
 *.py[cod]
 *.egg-info/
+.eggs/
+build/
+dist/
 .venv/
 venv/
-dist/
-build/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
-# --- Editors / OS ------------------------------------------------------
+# ---- Editors / OS ----
 .vscode/
 .idea/
 .DS_Store

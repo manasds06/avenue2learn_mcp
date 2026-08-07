@@ -6,14 +6,15 @@ Phases, deliverables, and exit criteria. Each phase ends with something demonstr
 
 | Phase | Deliverable | Rough size |
 |---|---|---|
+| **0a** | Try an existing D2L MCP server against Avenue | 20 min |
 | **0** | Probe — what can a student account actually reach? | Half a day |
 | **1** | Auth + HTTP client | 1–2 days |
-| **2** | Read-only tools | 2–3 days |
-| **3** | RAG | 2–4 days |
-| **4** | Polish, caching, setup | 1–2 days |
+| **2** | Read-only tools (14 of them) | 3–4 days |
+| **3** | RAG — files, then discussions, then page rendering | 3–5 days |
+| **4** | Polish, caching, keepalive, setup | 1–2 days |
 | **5** | Write tools — deferred, gated | Not scoped |
 
-Sizes assume part-time work by one person and are estimates, not commitments. Phase 3 has the widest range because document extraction always contains one surprise.
+Sizes assume part-time work by one person and are estimates, not commitments. Phases 2 and 3 grew from the original plan when quizzes, discussions, the what's-new digest, page rendering, and diagnostics were added. Phase 3 has the widest range because document extraction always contains one surprise.
 
 ---
 
@@ -21,11 +22,25 @@ Sizes assume part-time work by one person and are estimates, not commitments. Ph
 
 **Nothing downstream is trustworthy until this runs.**
 
-Two separate unknowns, and the first is bigger than the plan originally treated it:
+Four routes in [`02-api-surface.md`](02-api-surface.md) are marked ⚠️ — documented as instructor-scope, unknown for students. Two features hinge on them: assignments (`dropbox/folders/`) and grade projection (`grades/`). Building the tool layer before knowing the answers means designing against guesses.
 
-**The auth mechanism itself is unresolved.** [`01-authentication.md`](01-authentication.md) describes three strategies; the prior art we can inspect uses the one with the worst ergonomics. Whether the browser is needed once a day or once an hour is decided here, and it changes what the README can honestly promise.
+### Step 0a — the twenty-minute shortcut, before writing any code
 
-**Several routes are marked ⚠️** — unknown for students. Grade projection (`grades/`) hinges on one. Assignments (`dropbox/folders/`) was thought to, but the Instructor-scope claim behind that has been withdrawn ([`02`](02-api-surface.md)) and it's now expected to work.
+**Install an existing D2L MCP server and point it at Avenue.** `RohanMuppa/brightspace-mcp-server` advertises MFA support and "works with any school":
+
+```
+npx brightspace-mcp-server@latest
+```
+
+| Outcome | What it tells us |
+|---|---|
+| Lists your courses | The entire cookie-session premise in [`01-authentication.md`](01-authentication.md) is validated. Proceed with confidence. |
+| Login fails | McMaster's Entra chain breaks its automation — and *how* it breaks is exactly what our login flow must handle |
+| Logs in but returns nothing | Auth works, permissions are tighter than expected. Reprioritize the ⚠️ probes. |
+
+Twenty minutes to de-risk the foundational assumption of the whole project. Do this first.
+
+It is **not** a substitute for the probe: it's read-only, has no semantic search, is TypeScript, and won't tell us which specific ⚠️ routes work. It answers one question — *does this approach work at McMaster at all* — and that question gates everything else.
 
 ### Deliverable
 
@@ -34,7 +49,7 @@ A throwaway script — `scripts/probe.py`, not shipped, not polished — that:
 1. Runs the Playwright login flow, persists a session.
 2. Hits every route in [`02-api-surface.md`](02-api-surface.md) against a real course.
 3. Records status code, response shape, and a redacted sample for each.
-4. Measures session lifetime (idle and active).
+4. Measures session lifetime (idle and active), **and whether activity extends it** — this gates the keepalive decision.
 5. Writes findings into [`08-api-probe-results.md`](08-api-probe-results.md).
 6. Saves raw responses to `tests/fixtures/` — these become the test corpus for every later phase.
 
@@ -42,27 +57,31 @@ A throwaway script — `scripts/probe.py`, not shipped, not polished — that:
 
 | Question | Why it matters |
 |---|---|
-| **Which auth strategy works — cookies, minted bearer, or captured bearer?** | **Gates everything.** Decides whether the browser is a one-time login or an hourly runtime dependency ([`01`](01-authentication.md) §B0) |
-| Does `GET .../dropbox/folders/` work for a student? | Gates the full assignments feature — though the Instructor-scope claim has been withdrawn, so this is now expected to pass |
+| Does `GET .../dropbox/folders/` work for a student? | Gates the entire assignments feature |
 | Does `GET .../grades/` (structure) work? | Gates grade projection |
+| Does `GET .../quizzes/` work? | Gates quiz status; deadlines survive via calendar either way |
+| **Do assignment *and* quiz due dates appear in `calendar/events/myEvents/`?** | The fallback for **two** features — if not, both lose their safety net at once |
+| Do the `discussions/` routes work? | Gates the discussions corpus (expected yes — students post there) |
 | Does `GET .../classlist/` work? | Expected no; determines `get_class_list`'s honest shape |
 | Does `.../feedback/...` work for own submissions? | Nice-to-have enrichment |
 | What `lp` / `le` versions does the instance report? | Client construction |
 | What does an expired session return — 401, 302, or HTML 200? | Expiry detection ([`01`](01-authentication.md)) |
 | How long does a session live? | Sets user expectations |
+| **Does activity extend the session idle timer?** | Gates whether keepalive ships at all |
 | Is the full cookie jar needed, or just the documented pair? | Client construction |
 | Does McMaster SSO land on Avenue directly or bounce? | Login success-detection |
 | Is a browser-like `User-Agent` required? | Client construction |
+| Does an existing D2L MCP server authenticate against Avenue? | Step 0a — validates the whole premise |
 
 ### Exit criteria
 
-- [ ] **The auth strategy is decided and recorded** ([`08`](08-api-probe-results.md) §B0); the two that lost are deleted from [`01`](01-authentication.md)
+- [ ] **Step 0a run** — existing D2L MCP server tried against Avenue, result recorded
 - [ ] Every route in [`02-api-surface.md`](02-api-surface.md) marked ✅ Verified or ⛔ Blocked — no ⚠️ remaining
 - [ ] [`08-api-probe-results.md`](08-api-probe-results.md) filled in with real data
 - [ ] [`02-api-surface.md`](02-api-surface.md) status column updated **from** those results
 - [ ] [`03-mcp-tools.md`](03-mcp-tools.md) revised where contingent tools turned out degraded
 - [ ] Fixtures saved, PII redacted
-- [ ] Session lifetime measured
+- [ ] Session lifetime measured, **and keepalive viability decided**
 
 **Doc updates flow probe → docs, never the reverse.** If the probe says the class list is blocked, the tool description changes to match. Adjusting the probe's interpretation to preserve a planned feature is the failure mode to avoid.
 
@@ -84,9 +103,8 @@ The foundation. Everything else calls this.
 
 ### Exit criteria
 
-- [ ] `avenue-mcp login` completes a real MacID + MFA sign-in and writes `session.json`
-- [ ] **The session file is verifiably owner-only** — `icacls session.json` on Windows, `ls -l` on POSIX. Not "we called `chmod`": `chmod` is a no-op on Windows ([`01`](01-authentication.md)), so this must be checked, not assumed.
-- [ ] A second process loads that session and calls `whoami` successfully — **no browser**, *provided Phase 0 found cookie or minted-bearer auth works.* If the probe found only `CapturedBearerAuth` viable, this criterion is retired and the browser-refresh interval is documented instead.
+- [ ] `avenue-mcp login` completes a real MacID + MFA sign-in and writes `session.json` at `0600`
+- [ ] A second process loads that session and calls `whoami` successfully — **no browser**
 - [ ] `myenrollments` returns real courses, pages correctly past page one
 - [ ] API version negotiated from `/d2l/api/versions/`, not hardcoded anywhere
 - [ ] Expired session produces `SessionExpiredError`, not a JSON parse failure
@@ -104,34 +122,45 @@ The server becomes useful.
 
 ### Deliverable
 
-The v1 tools from [`03-mcp-tools.md`](03-mcp-tools.md), minus the two RAG ones:
+The live-data tools from [`03-mcp-tools.md`](03-mcp-tools.md) — everything except the RAG pair and `get_page_image`:
 
-`list_courses` · `get_course_content` · `read_content_file` · `list_assignments` · `get_upcoming_deadlines` · `get_grades` · `analyze_grade_summary` · `list_announcements` · `get_class_list`
+`get_status` · `list_courses` · `get_course_content` · `read_content_file` · `list_assignments` · `list_quizzes` · `get_upcoming_deadlines` · `get_grades` · `analyze_grade_summary` · `list_announcements` · `list_discussions` · `read_discussion_thread` · `get_whats_new` · `get_class_list`
 
-Plus `server.py` registration and `util/` helpers (HTML→text, timezone).
+Plus `server.py` registration, `rag/watermarks.py` (needed by `get_whats_new`), and `util/` helpers (HTML→text, timezone).
 
 ### Order
 
-1. `list_courses` — every other tool needs an `org_unit_id`
-2. `list_announcements` — simplest end-to-end; proves the tool pattern
-3. `get_course_content` + `read_content_file` — also unblocks Phase 3
-4. `get_grades` → `analyze_grade_summary`
-5. `list_assignments` → `get_upcoming_deadlines`
-6. `get_class_list` — last, most likely degraded
+1. **`get_status`** — first, deliberately. It's trivial, needs no session, and makes every later phase easier to debug.
+2. `list_courses` — every other tool needs an `org_unit_id`
+3. `list_announcements` — simplest network tool; proves the pattern
+4. `get_course_content` + `read_content_file` — also unblocks Phase 3
+5. `get_grades` → `analyze_grade_summary`
+6. `list_assignments` + `list_quizzes` → `get_upcoming_deadlines`
+7. `list_discussions` + `read_discussion_thread`
+8. `get_whats_new` — last of the data tools; it composes several of the above
+9. `get_class_list` — most likely degraded
 
 ### Exit criteria
 
-- [ ] All nine registered and callable from Claude Code against a live account
+- [ ] All fourteen registered and callable from Claude Code against a live account
+- [ ] `get_status` works with **no session at all** and reports that accurately
 - [ ] `list_courses` returns current courses only by default; `include_inactive` works
 - [ ] `read_content_file` extracts text from a real PDF, DOCX, and PPTX
-- [ ] `get_upcoming_deadlines` spans courses, sorted, **and renders Eastern time correctly** — a deadline at 11:59 PM local does not display as the next day
+- [ ] `read_content_file` truncates at the 12k default and returns a usable `next_start_page`
+- [ ] `get_upcoming_deadlines` spans courses, includes **quizzes as well as assignments**, sorted
+- [ ] **DST fixtures pass** — a deadline at 11:59 PM Eastern never renders as the next day, on either side of a transition
+- [ ] `list_quizzes` distinguishes *past due but still open* from *closed*
+- [ ] `read_discussion_thread` preserves reply structure and omits author names
+- [ ] `get_whats_new` reports changes correctly, and `mark_seen: false` leaves the watermark untouched
+- [ ] Calling `get_whats_new` twice in a row returns the same result the second time (watermark not consumed prematurely)
 - [ ] `analyze_grade_summary` computes a correct weighted average against a hand-checked course
 - [ ] With weights unavailable, it returns `weights_available: false` and **omits the projection** rather than guessing
+- [ ] With `AVENUE_MCP_GRADE_SCALE` unset, it never claims a letter grade
 - [ ] Degraded tools' descriptions match what they actually return
 - [ ] Every tool returns a typed error with an actionable message on failure
-- [ ] Manual pass: ask Claude "what's due in the next two weeks?" and get a correct answer
+- [ ] Manual pass: "what's due in the next two weeks?" and "what did I miss?" both answer correctly
 
-The weights criterion is called out because it's the one place a plausible wrong number does real damage. A fabricated "you need 74% on the final" is worse than an honest refusal.
+The grade criteria are called out because that's the one place a plausible wrong number does real damage. A fabricated "you need 74% on the final" is worse than an honest refusal — and per [`05-architecture.md`](05-architecture.md), drop-lowest rules and bonus items mean a naive weighted average is wrong in more courses than you'd expect. Hand-check against a real gradebook, not a synthetic one.
 
 ---
 
@@ -141,30 +170,38 @@ The feature that makes this more than a data fetcher.
 
 ### Deliverable
 
-Per [`04-rag-design.md`](04-rag-design.md): `rag/sync.py`, `extract.py`, `chunk.py`, `embed.py`, `store.py`, plus the `search_course_materials` and `sync_course_materials` tools.
+Per [`04-rag-design.md`](04-rag-design.md): `rag/sync.py`, `extract.py`, `chunk.py`, `embed.py`, `render.py`, `store.py`, plus `search_course_materials`, `sync_course_materials`, and `get_page_image`.
 
 ### Order
 
-1. `store.py` — schema, migrations, FTS5, vector persistence
+1. `store.py` — schema (files **and** discussions), migrations, FTS5, vector persistence
 2. `extract.py` — PDF first, then PPTX, DOCX, HTML, TXT
-3. `chunk.py` — structure-aware splitting
+3. `chunk.py` — structure-aware splitting for files
 4. `embed.py` — fastembed wrapper, model-identity recording
-5. `sync.py` — orchestration, diffing, error collection
+5. `sync.py` — orchestration, diffing, error collection — **files only at first**
 6. Retrieval — vector + FTS5 + RRF fusion
-7. Both tools
+7. `search_course_materials` + `sync_course_materials` — **ship and validate on files alone**
+8. **Then** discussions: thread walking, question+reply chunking, role/recency ranking
+9. `render.py` + `get_page_image` — PDF path first; PPTX (via LibreOffice) after
+
+Steps 7 and 8 are split on purpose. Files-only RAG is independently useful and much easier to debug; folding discussions in from the start makes "why did retrieval get worse?" a two-variable question.
 
 ### Evaluation set
 
-Before tuning anything, build a small ground-truth set — ~15 real questions with known answers and known source pages:
+Build this **before** tuning anything — ~15 real questions with known answers and known sources:
 
 | Question | Expected source |
 |---|---|
 | "What's the late penalty in 2C03?" | `2C03_outline_W26.pdf` p.3 |
 | "What's the A3 weight?" | outline, grading section |
 | "Which lecture covered red-black trees?" | Week 7 deck |
+| "Does A3 want the recursive version?" | **discussion thread, instructor reply** |
+| "Explain the diagram on slide 14" | **visual — needs `get_page_image`** |
 | … | … |
 
-Retrieval quality is not assessable by vibes. Without this set, "does hybrid search beat pure vector?" is unanswerable and every tuning decision is guesswork.
+Include several questions answerable **only** from a discussion thread and several **only** from a figure. Those are precisely the cases justifying the two capabilities added here — and if they don't measurably improve retrieval, that is worth discovering rather than assuming.
+
+Retrieval quality is not assessable by vibes. Without this set, "does hybrid beat vector-only?" and "do discussions help?" are unanswerable and every tuning decision is guesswork dressed as engineering.
 
 ### Exit criteria
 
@@ -174,11 +211,18 @@ Retrieval quality is not assessable by vibes. Without this set, "does hybrid sea
 - [ ] PDF, DOCX, PPTX, HTML, TXT all extract with correct position info
 - [ ] Scanned/image-only PDFs are **detected and reported**, not silently indexed empty
 - [ ] Every result carries a citation with course, file, and page/slide
-- [ ] Hybrid retrieval beats vector-only on the eval set — measured, not assumed
+- [ ] Hybrid retrieval beats vector-only on the eval set — **measured**, not assumed
 - [ ] Course scoping is a hard filter: a scoped query **never** returns another course's content
 - [ ] Empty results include `indexed_courses` so "not indexed" is distinguishable from "not found"
 - [ ] Changing `AVENUE_MCP_EMBED_MODEL` triggers `EmbedModelMismatchError`, not a silently mixed index
-- [ ] Manual pass: "what's the late policy in [course]?" answers correctly with a citation
+- [ ] **`search_course_materials` works with no session** — verified by deleting `session.json` and searching
+- [ ] Discussion chunks retrieve for the discussion-only eval questions
+- [ ] Discussion citations carry `author_role` and `posted_at`, and **no author names**
+- [ ] Instructor replies outrank student speculation on at least one eval question where both match
+- [ ] Discussion sync is incremental — re-syncing a thread fetches only new posts
+- [ ] `get_page_image` renders a real PDF page legibly at default DPI
+- [ ] PPTX rendering works, or fails with a clear "install LibreOffice" message — not obscurely
+- [ ] Manual pass: "what's the late policy in [course]?" cites correctly; "explain the diagram on slide N" shows the actual figure
 
 ---
 
@@ -188,11 +232,12 @@ Make it something someone else can actually run.
 
 ### Deliverable
 
-- Response cache (LRU + TTL) per [`05`](05-architecture.md); grades and submission status excluded
+- Response cache (LRU + TTL) per [`05`](05-architecture.md); grades, submission status, and computed digests excluded
+- **Session keepalive** — implemented per [`01`](01-authentication.md), shipped default-off, enabled only if Phase 0 showed sessions extend on activity
 - Progress reporting for long syncs
 - Error message pass — every user-facing string has a next action
 - Logging: structured, level-controlled, **credential-redacted**
-- Setup docs: install, Playwright browser install, first login, MCP client config
+- Setup docs: install, Playwright browser install, LibreOffice note for PPTX rendering, first login, MCP client config
 - `.gitignore` covering `.avenue-mcp/`, `*.session.json`, `storage_state.json`, fixtures with PII
 - `pyproject.toml` complete with entry points
 
@@ -201,12 +246,15 @@ Make it something someone else can actually run.
 - [ ] A fresh clone reaches working tools by following the README alone, with no undocumented steps
 - [ ] Cache measurably reduces requests on repeated `get_upcoming_deadlines` calls
 - [ ] Grades are **not** cached — verified by regrading and re-querying
+- [ ] `get_whats_new` results are not cached — two calls around a watermark advance behave correctly
+- [ ] Keepalive starts only after a first tool call and stops on idle — verified by watching request logs
+- [ ] With `AVENUE_MCP_KEEPALIVE_MINUTES=0`, **zero** background requests are made
 - [ ] Logs contain no cookies, tokens, or session values — grep-verified
 - [ ] Long sync reports progress rather than appearing hung
 - [ ] Every error message names a concrete next action
 - [ ] `git status` is clean after a full login + sync cycle — no stray state files
 
-The last one is a real check, not a formality. A session file accidentally landing inside the repo is the most plausible way this project leaks a credential.
+Two real checks, not formalities. The `git status` one because a session file landing inside the repo is the most plausible way this project leaks a credential. The zero-background-requests one because that claim appears in [`07-risks-and-policy.md`](07-risks-and-policy.md) as a statement about behavior, and a documented property that nobody verified is just a hope.
 
 ---
 
@@ -230,23 +278,27 @@ Reason for the caution, stated plainly: **a submission cannot be undone.** Brigh
 ## Dependency graph
 
 ```
-Phase 0 ──▶ Phase 1 ──▶ Phase 2 ──┬──▶ Phase 4 ──▶ Phase 5
-                                   │
-                    Phase 2 (content tools) ──▶ Phase 3 ──┘
+Step 0a (20 min) ──▶ Phase 0 ──▶ Phase 1 ──▶ Phase 2 ──┬──▶ Phase 4 ──▶ Phase 5
+                                                        │
+                       Phase 2 (content tools) ──▶ Phase 3 ──┘
 ```
 
 Phase 3 needs `read_content_file` from Phase 2 but not the whole phase — content tools can be built early to unblock RAG work in parallel.
 
-Phase 0 blocks everything. It's half a day of work that determines whether two of the headline features are buildable as designed.
+Phase 0 blocks everything, and Step 0a blocks Phase 0 for twenty minutes at effectively zero cost. Between them they determine whether the auth premise holds at all and whether two headline features are buildable as designed.
 
 ## What "done" means for v1
 
 A student can open Claude Code and ask:
 
-- "What's due in the next two weeks?" → correct, cross-course, correct local times
-- "What's the late penalty in 2C03?" → correct, cited to a file and page
-- "How am I doing in MATH 2Z03?" → real grades, honest about what it can't compute
-- "What did my prof announce this week?" → actual announcements
-- "Explain slide 14 of the Week 8 deck" → real slide content
+| Question | Expected behavior |
+|---|---|
+| "What's due in the next two weeks?" | Correct, cross-course, **assignments and quizzes**, correct Eastern times |
+| "What did I miss?" | New announcements, files, grades, and discussion replies since last check |
+| "What's the late penalty in 2C03?" | Correct, cited to file and page |
+| "Does A3 want the recursive version?" | Found in the discussion thread, attributed to the instructor and dated |
+| "How am I doing in MATH 2Z03?" | Real grades; honest about what it can't compute |
+| "Explain the diagram on slide 14" | The actual rendered slide, not just the words on it |
+| "Is everything set up right?" | `get_status` — session state, what's indexed, what's enabled |
 
-with one daily login, no API keys, no coursework leaving the machine, and no ability to submit anything by accident.
+With one daily login (fewer if keepalive proves viable), no API keys, no coursework leaving the machine, working semantic search even when the session has expired, and no ability to submit anything by accident.

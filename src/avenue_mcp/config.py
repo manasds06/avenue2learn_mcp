@@ -1,13 +1,13 @@
-"""Environment-driven settings (docs/05-architecture.md).
+"""Environment-driven configuration.
 
-No config file, no CLI flags for anything that matters — MCP servers are
-launched by a client with an env block, so env is the only channel that
-reliably exists.
+MCP servers are launched by a client with an env block, so environment
+variables are the only configuration channel that reliably exists.
 """
 
 from __future__ import annotations
 
-import os
+import json
+from functools import lru_cache
 from pathlib import Path
 
 from pydantic import Field, field_validator
@@ -21,31 +21,55 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # Nothing here is McMaster-specific except the default URL and the login
-    # flow's success detection. The Valence API is the same everywhere, so
-    # another D2L school should mostly work by overriding this.
-    base_url: str = "https://avenue.mcmaster.ca"
+    # --- Instance ---------------------------------------------------------
+    # IMPORTANT: avenue.mcmaster.ca is a static Apache landing page, NOT the
+    # Brightspace application -- every /d2l/* path 404s there. The real
+    # Brightspace host is avenue.cllmcmaster.ca, confirmed by
+    # GET /d2l/api/versions/ returning live Valence JSON (lp 1.62, le 1.96).
+    #
+    # Login STARTS on the landing page (login.php -> Microsoft SAML) and lands
+    # on the Brightspace host, so the two are configured separately.
+    base_url: str = "https://avenue.cllmcmaster.ca"
+    login_url: str = "https://avenue.mcmaster.ca/login.php"
+    timezone: str = "America/Toronto"
+
+    # --- State ------------------------------------------------------------
     state_dir: Path = Field(default_factory=lambda: Path.home() / ".avenue-mcp")
 
+    # --- Safety -----------------------------------------------------------
+    # Off by default. When off, write tools are not registered at all, so
+    # the model never sees them.
     enable_writes: bool = False
 
+    # --- RAG --------------------------------------------------------------
     embed_model: str = "BAAI/bge-small-en-v1.5"
+    index_discussions: bool = True
+    render_dpi: int = 120
     max_file_mb: int = 100
 
+    # --- Politeness -------------------------------------------------------
     max_concurrency: int = 4
     min_request_interval_ms: int = 100
     cache_ttl_seconds: int = 300
-    request_timeout_seconds: float = 30.0
+    request_timeout_seconds: float = 60.0
+    download_timeout_seconds: float = 120.0
+    max_retries: int = 3
+    max_pages: int = 50
 
+    # --- Keepalive --------------------------------------------------------
+    # 0 disables. Default off until Phase 0 confirms sessions extend on
+    # activity. See docs/01-authentication.md.
+    keepalive_minutes: int = 0
+    keepalive_idle_stop: int = 120
+
+    # --- Grades -----------------------------------------------------------
+    # Path to a JSON letter-grade cutoff table. Unset means no letter
+    # projections are ever claimed -- cutoffs vary by faculty, so a single
+    # hardcoded scale would be wrong for some of a student's own courses.
+    grade_scale: Path | None = None
+
+    # --- Logging ----------------------------------------------------------
     log_level: str = "INFO"
-    timezone: str = "America/Toronto"
-
-    # A default httpx UA is an easy thing for a WAF to flag. Probe question B6
-    # confirms whether a browser-like one is actually required.
-    user_agent: str = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    )
 
     @field_validator("base_url")
     @classmethod
@@ -55,10 +79,11 @@ class Settings(BaseSettings):
     @field_validator("state_dir", mode="before")
     @classmethod
     def _expand(cls, v: object) -> object:
-        return Path(os.path.expanduser(v)) if isinstance(v, str) else v
+        if isinstance(v, str):
+            return Path(v).expanduser()
+        return v
 
-    # --- Derived paths ---------------------------------------------------
-
+    # --- Derived paths ----------------------------------------------------
     @property
     def session_path(self) -> Path:
         return self.state_dir / "session.json"
@@ -72,6 +97,10 @@ class Settings(BaseSettings):
         return self.state_dir / "cache"
 
     @property
+    def render_dir(self) -> Path:
+        return self.cache_dir / "renders"
+
+    @property
     def log_dir(self) -> Path:
         return self.state_dir / "logs"
 
@@ -79,28 +108,33 @@ class Settings(BaseSettings):
     def writes_log_path(self) -> Path:
         return self.log_dir / "writes.log"
 
-    @property
-    def max_file_bytes(self) -> int:
-        return self.max_file_mb * 1024 * 1024
-
     def ensure_dirs(self) -> None:
-        """Create the state directory tree. Cheap, idempotent, no network."""
-        for d in (self.state_dir, self.cache_dir, self.log_dir):
-            d.mkdir(parents=True, exist_ok=True)
+        for p in (self.state_dir, self.cache_dir, self.render_dir, self.log_dir):
+            p.mkdir(parents=True, exist_ok=True)
+        # The state dir holds a credential; keep it owner-only where the
+        # platform supports it.
+        try:
+            self.state_dir.chmod(0o700)
+        except (OSError, NotImplementedError):
+            pass
+
+    def load_grade_scale(self) -> dict[str, float] | None:
+        """Letter-grade cutoffs, or None if not configured."""
+        if self.grade_scale is None:
+            return None
+        try:
+            data = json.loads(Path(self.grade_scale).expanduser().read_text("utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        out: dict[str, float] = {}
+        for k, v in data.items():
+            try:
+                out[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        return out or None
 
 
-_settings: Settings | None = None
-
-
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Process-wide settings singleton."""
-    global _settings
-    if _settings is None:
-        _settings = Settings()
-    return _settings
-
-
-def reset_settings() -> None:
-    """Test hook — forces the next get_settings() to re-read the environment."""
-    global _settings
-    _settings = None
+    return Settings()

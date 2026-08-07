@@ -1,268 +1,320 @@
-"""get_course_content and read_content_file (docs/03-mcp-tools.md).
-
-The content tree is also the RAG layer's input, so the walk here is the same
-one sync_course_materials will use.
-"""
+"""Content tools: browse the tree, read a file, render a page."""
 
 from __future__ import annotations
 
 import logging
-import re
+from pathlib import Path
 from typing import Any
 
-from avenue_mcp.client.d2l import D2LClient
-from avenue_mcp.errors import ExtractionError, InvalidRequestError, NotFoundError
-from avenue_mcp.util.dates import describe, parse_d2l_date
-from avenue_mcp.util.html import html_to_text
+from avenue_mcp.client import models as m
+from avenue_mcp.context import AppContext
+from avenue_mcp.errors import ExtractionError, RenderError
+from avenue_mcp.rag import extract as extractor
+from avenue_mcp.rag import render as renderer
+from avenue_mcp.util.dates import describe, parse_d2l
 
 log = logging.getLogger(__name__)
 
-# Topic types Brightspace reports. Only File topics have a body to download;
-# Link and Page topics do not, and asking for one returns an error.
-TOPIC_FILE = 1
-TOPIC_LINK = 3
-
-_TEXT_MIMES = ("text/", "application/json", "application/xml")
-
-
-def _is_downloadable(topic: dict[str, Any]) -> bool:
-    """Whether read_content_file can do anything with this topic.
-
-    Surfaced as a flag so the model doesn't have to guess and burn a tool call
-    discovering that a link topic has no file.
-    """
-    if topic.get("TypeIdentifier") == "Link":
-        return False
-    url = topic.get("Url") or ""
-    if not url:
-        return False
-    # An external link topic points off-instance; there's nothing to fetch
-    # from the content API for it.
-    return not url.startswith(("http://", "https://"))
-
-
-def _normalize_topic(topic: dict[str, Any], tz: str) -> dict[str, Any]:
-    url = topic.get("Url") or ""
-    file_name = url.rsplit("/", 1)[-1] if url else ""
-    return {
-        "id": topic.get("Id"),
-        "title": topic.get("Title") or "",
-        "type": topic.get("TypeIdentifier") or "Topic",
-        "file_name": file_name,
-        "url": url,
-        "last_modified": describe(parse_d2l_date(topic.get("LastModifiedDate")), tz),
-        "is_downloadable": _is_downloadable(topic),
-    }
-
-
-async def _walk_module(
-    client: D2LClient,
-    org_unit_id: int,
-    module: dict[str, Any],
-    *,
-    depth: int,
-    max_depth: int,
-    visited: set[int],
-    counter: dict[str, int],
-    tz: str,
-) -> dict[str, Any]:
-    """Recursively expand a module.
-
-    Depth-capped and cycle-guarded: recursive tree-walking against a remote
-    API is a good way to write an accidental infinite loop if the data ever
-    contains a cycle.
-    """
-    module_id = module.get("Id")
-    node: dict[str, Any] = {
-        "id": module_id,
-        "title": module.get("Title") or "",
-        "topics": [],
-        "modules": [],
-    }
-
-    if module_id is None or module_id in visited or depth >= max_depth:
-        if depth >= max_depth:
-            node["truncated"] = "max_depth reached"
-        return node
-    visited.add(module_id)
-
-    try:
-        children = await client.get_json(
-            "le", f"{org_unit_id}/content/modules/{module_id}/structure/"
-        )
-    except NotFoundError:
-        return node
-
-    for child in children if isinstance(children, list) else []:
-        if not isinstance(child, dict):
-            continue
-        if child.get("Type") == 0 or "Structure" in child or child.get("TypeIdentifier") == "Module":
-            node["modules"].append(
-                await _walk_module(
-                    client, org_unit_id, child,
-                    depth=depth + 1, max_depth=max_depth,
-                    visited=visited, counter=counter, tz=tz,
-                )
-            )
-        else:
-            node["topics"].append(_normalize_topic(child, tz))
-            counter["topics"] += 1
-
-    return node
+MAX_TREE_DEPTH = 10
 
 
 async def get_course_content(
-    client: D2LClient,
-    *,
-    org_unit_id: int,
-    max_depth: int = 10,
+    ctx: AppContext, org_unit_id: int, max_depth: int = MAX_TREE_DEPTH
 ) -> dict[str, Any]:
-    """The course's Content tree — structure only, no file contents."""
-    tz = client.settings.timezone
-    roots = await client.get_json("le", f"{org_unit_id}/content/root/")
+    """Structure only. Reading a file's text is read_content_file; searching
+    across files by meaning is search_course_materials."""
+    await ctx.require_session()
+    tz = ctx.settings.timezone
 
+    root = await ctx.client.get("le", f"{org_unit_id}/content/root/")
+    seen_modules: set[int] = set()
     counter = {"topics": 0}
-    visited: set[int] = set()
-    modules: list[dict[str, Any]] = []
+    unreadable: list[dict[str, Any]] = []
 
-    for root in roots if isinstance(roots, list) else []:
-        if not isinstance(root, dict):
-            continue
-        modules.append(
-            await _walk_module(
-                client, org_unit_id, root,
-                depth=0, max_depth=max_depth,
-                visited=visited, counter=counter, tz=tz,
+    async def walk(nodes: Any, depth: int) -> list[dict[str, Any]]:
+        if depth > max_depth or not isinstance(nodes, list):
+            return []
+        modules: list[dict[str, Any]] = []
+        topics: list[dict[str, Any]] = []
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            title = str(m.pick(node, "Title", "Name", default="") or "")
+            node_type = str(m.pick(node, "Type", default="")).lower()
+            is_module = (
+                node_type == "module"
+                or "Structure" in node
+                or "Modules" in node
+                or m.as_int(m.pick(node, "ModuleId")) is not None
             )
-        )
+
+            if is_module:
+                mod_id = m.as_int(m.pick(node, "Id", "ModuleId"))
+                if mod_id is None or mod_id in seen_modules:
+                    continue
+                seen_modules.add(mod_id)
+                structure = m.pick(node, "Structure", "Modules", "Topics")
+                if not isinstance(structure, list):
+                    try:
+                        structure = await ctx.client.get(
+                            "le", f"{org_unit_id}/content/modules/{mod_id}/structure/"
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- keep walking
+                        # Recorded, not silently swallowed. Dropping a whole
+                        # subtree and still reporting a confident topic_count
+                        # made the tool claim a course has 12 files when it has
+                        # 40, with nothing to indicate the tree was partial.
+                        log.info("module %s unreadable: %s", mod_id, exc)
+                        unreadable.append(
+                            {"module_id": mod_id, "title": title, "reason": str(exc)[:160]}
+                        )
+                        structure = []
+                children = await walk(structure, depth + 1)
+                nested_topics = [c for c in children if c.get("_kind") == "topic"]
+                nested_modules = [c for c in children if c.get("_kind") == "module"]
+                modules.append(
+                    {
+                        "_kind": "module",
+                        "id": mod_id,
+                        "title": title,
+                        "topics": [_clean(t) for t in nested_topics],
+                        "modules": [_clean(x) for x in nested_modules],
+                    }
+                )
+                continue
+
+            topic_id = m.as_int(m.pick(node, "Id", "TopicId"))
+            if topic_id is None:
+                continue
+            counter["topics"] += 1
+            file_name = m.guess_filename(node)
+            downloadable = m.topic_is_file(node)
+            topics.append(
+                {
+                    "_kind": "topic",
+                    "id": topic_id,
+                    "title": title or file_name,
+                    "type": _topic_type_name(node),
+                    "file_name": file_name,
+                    "mime_type": m.mime_from_name(file_name),
+                    "last_modified": describe(
+                        parse_d2l(m.pick(node, "LastModifiedDate", "LastModified")), tz
+                    ),
+                    # False for link and embedded-page topics, so the model does
+                    # not attempt read_content_file on something with no body.
+                    "is_downloadable": downloadable,
+                    "is_renderable": bool(file_name and renderer.is_renderable(file_name)),
+                }
+            )
+
+        return modules + topics
+
+    tree = await walk(root if isinstance(root, list) else [root], 0)
 
     return {
         "org_unit_id": org_unit_id,
-        "modules": modules,
+        "course_name": await ctx.course_name(org_unit_id),
+        "modules": [_clean(x) for x in tree if x.get("_kind") == "module"],
+        "topics": [_clean(x) for x in tree if x.get("_kind") == "topic"],
         "topic_count": counter["topics"],
-        "module_count": len(visited),
-    }
-
-
-def _extract_text(data: bytes, mime: str, file_name: str) -> tuple[str, int | None]:
-    """Extract text and a page/slide count from file bytes.
-
-    PDF/DOCX/PPTX need the optional [rag] extras. When they're missing we say
-    so with an install hint rather than failing opaquely — the core server is
-    installable without onnxruntime and friends by design.
-    """
-    lowered = file_name.lower()
-
-    if lowered.endswith(".pdf") or "pdf" in mime:
-        try:
-            import pymupdf
-        except ImportError as exc:
-            raise ExtractionError(
-                "Reading PDFs needs the optional extras. Install with: pip install -e \".[rag]\""
-            ) from exc
-        with pymupdf.open(stream=data, filetype="pdf") as doc:
-            # Page markers so the model can cite precisely.
-            pages = [f"[page {i + 1}]\n{page.get_text()}" for i, page in enumerate(doc)]
-            return "\n\n".join(pages), len(pages)
-
-    if lowered.endswith(".pptx"):
-        try:
-            from pptx import Presentation
-        except ImportError as exc:
-            raise ExtractionError(
-                "Reading PPTX needs the optional extras. Install with: pip install -e \".[rag]\""
-            ) from exc
-        import io
-
-        deck = Presentation(io.BytesIO(data))
-        slides = []
-        for i, slide in enumerate(deck.slides):
-            parts = [sh.text for sh in slide.shapes if getattr(sh, "has_text_frame", False)]
-            # Speaker notes often carry the actual explanation the slide omits.
-            if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
-                notes = slide.notes_slide.notes_text_frame.text.strip()
-                if notes:
-                    parts.append(f"[notes] {notes}")
-            slides.append(f"[slide {i + 1}]\n" + "\n".join(p for p in parts if p))
-        return "\n\n".join(slides), len(slides)
-
-    if lowered.endswith(".docx"):
-        try:
-            import docx
-        except ImportError as exc:
-            raise ExtractionError(
-                "Reading DOCX needs the optional extras. Install with: pip install -e \".[rag]\""
-            ) from exc
-        import io
-
-        document = docx.Document(io.BytesIO(data))
-        return "\n".join(p.text for p in document.paragraphs if p.text.strip()), None
-
-    if lowered.endswith((".html", ".htm")) or "html" in mime:
-        return html_to_text(data.decode("utf-8", errors="replace")), None
-
-    if lowered.endswith((".txt", ".md", ".csv")) or any(m in mime for m in _TEXT_MIMES):
-        return data.decode("utf-8", errors="replace"), None
-
-    raise ExtractionError(
-        f"Can't extract text from {file_name or 'this file'} (type: {mime or 'unknown'}). "
-        f"Supported: PDF, DOCX, PPTX, HTML, TXT."
-    )
-
-
-async def read_content_file(
-    client: D2LClient,
-    *,
-    org_unit_id: int,
-    topic_id: int,
-    max_chars: int = 50_000,
-) -> dict[str, Any]:
-    """Download one Content file and return its extracted text."""
-    topic = await client.get_json("le", f"{org_unit_id}/content/topics/{topic_id}")
-    if not isinstance(topic, dict):
-        raise NotFoundError(f"Topic {topic_id} not found in course {org_unit_id}.")
-
-    if not _is_downloadable(topic):
-        raise InvalidRequestError(
-            f"Topic {topic_id} ({topic.get('Title') or 'untitled'}) is a link or page, "
-            f"not a file — there's nothing to download. Use get_course_content to find "
-            f"topics with is_downloadable: true."
-        )
-
-    headers, payload = await client.download_file(
-        "le", f"{org_unit_id}/content/topics/{topic_id}/file"
-    )
-    data = payload if isinstance(payload, bytes) else payload.read_bytes()
-
-    url = topic.get("Url") or ""
-    file_name = url.rsplit("/", 1)[-1] or f"topic-{topic_id}"
-    disposition = headers.get("content-disposition", "")
-    if match := re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', disposition):
-        file_name = match.group(1)
-    mime = headers.get("content-type", "").split(";")[0].strip()
-
-    text, page_count = _extract_text(data, mime, file_name)
-
-    # A multi-page document that yields almost nothing is a scanned image.
-    # Say so rather than returning an empty string that reads as "no content".
-    quality = "ok"
-    if page_count and page_count > 1 and len(text.strip()) < 100:
-        quality = "poor"
-
-    truncated = len(text) > max_chars
-    return {
-        "topic_id": topic_id,
-        "title": topic.get("Title") or "",
-        "file_name": file_name,
-        "mime_type": mime,
-        "page_count": page_count,
-        "text": text[:max_chars],
-        "truncated": truncated,
-        "extraction_quality": quality,
+        "complete": not unreadable,
+        "unreadable_modules": unreadable,
         "note": (
-            "This document appears to be scanned images — almost no text could be "
-            "extracted. OCR is not supported."
-            if quality == "poor"
+            f"{len(unreadable)} module(s) could not be read, so this tree is "
+            "INCOMPLETE and topic_count undercounts the course."
+            if unreadable
             else None
         ),
     }
+
+
+def _clean(node: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in node.items() if k != "_kind"}
+
+
+def _topic_type_name(node: dict[str, Any]) -> str:
+    t = m.as_int(m.pick(node, "TopicType", "Type"))
+    return {1: "File", 3: "Link"}.get(t or 0, "Topic")
+
+
+async def read_content_file(
+    ctx: AppContext,
+    org_unit_id: int,
+    topic_id: int,
+    max_chars: int = 12_000,
+    start_page: int = 1,
+) -> dict[str, Any]:
+    """Extract text from one file, paginated by page/slide.
+
+    The default cap is 12k characters (~3k tokens), not 50k: a 60-page deck
+    fully extracted is a large fraction of a context window from one call, and
+    the model usually needs one section rather than the whole thing.
+    """
+    await ctx.require_session()
+
+    meta: dict[str, Any] = {}
+    try:
+        meta = await ctx.client.get("le", f"{org_unit_id}/content/topics/{topic_id}") or {}
+    except Exception as exc:  # noqa: BLE001 -- metadata is a nice-to-have
+        log.debug("topic metadata unavailable for %s: %s", topic_id, exc)
+
+    title = m.pick(meta, "Title", "Name")
+    file_name = m.guess_filename(meta) if meta else None
+    dest = ctx.settings.cache_dir / str(org_unit_id) / str(topic_id) / (
+        file_name or f"topic-{topic_id}"
+    )
+
+    info = await ctx.client.download(
+        "le", f"{org_unit_id}/content/topics/{topic_id}/file", dest
+    )
+    path = Path(info["path"])
+    actual_name = info.get("filename") or file_name or path.name
+
+    if not extractor.is_supported(path) and not extractor.is_supported(actual_name):
+        raise ExtractionError(
+            f"{actual_name} is not a text-extractable format. Supported: "
+            "PDF, DOCX, PPTX, HTML, TXT, MD, CSV."
+        )
+
+    result = extractor.extract(path, info.get("mime_type"))
+
+    if result.quality != "ok":
+        return {
+            "topic_id": topic_id,
+            "title": title,
+            "file_name": actual_name,
+            "mime_type": info.get("mime_type"),
+            "page_count": result.page_count,
+            "text": "",
+            "truncated": False,
+            "extraction_quality": result.quality,
+            # Reported, not silently returned as empty -- a model that thinks a
+            # document is blank will confidently say the outline doesn't
+            # mention late penalties.
+            "note": result.note,
+        }
+
+    segments = result.segments
+    if start_page > 1:
+        segments = [s for s in segments if (s.page or 0) >= start_page] or segments[
+            min(start_page - 1, len(segments) - 1):
+        ]
+
+    parts: list[str] = []
+    used = 0
+    next_start: int | None = None
+    first_pos = segments[0].position if segments else None
+    last_pos = first_pos
+
+    for seg in segments:
+        block = f"[{seg.position}]\n{seg.text}"
+        if used + len(block) > max_chars and parts:
+            next_start = seg.page or None
+            break
+        parts.append(block)
+        used += len(block) + 2
+        last_pos = seg.position
+
+    text = "\n\n".join(parts)
+    truncated = next_start is not None or (
+        len(segments) > len(parts) and len(parts) > 0
+    )
+
+    return {
+        "topic_id": topic_id,
+        "title": title,
+        "file_name": actual_name,
+        "mime_type": info.get("mime_type"),
+        "page_count": result.page_count,
+        "pages_returned": (
+            f"{first_pos}–{last_pos}" if first_pos != last_pos else first_pos
+        ),
+        "text": text,
+        "truncated": truncated,
+        "next_start_page": next_start,
+        "extraction_quality": result.quality,
+        "hint": (
+            "Output was truncated. Call again with start_page=%s, or use "
+            "search_course_materials to jump straight to the relevant passage."
+            % next_start
+            if truncated and next_start
+            else None
+        ),
+    }
+
+
+async def get_page_image(
+    ctx: AppContext,
+    org_unit_id: int,
+    topic_id: int,
+    page: int,
+    dpi: int | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    """Render one page/slide as PNG. Returns (png_bytes, metadata).
+
+    Text extraction gets the words and loses the figure, so this is the tool for
+    diagrams, graphs, and layout-dependent tables.
+    """
+    dpi = dpi or ctx.settings.render_dpi
+    ctx.note_activity()
+
+    # Prefer a cached copy: this can work with no session at all.
+    cached = _find_cached(ctx, org_unit_id, topic_id)
+    if cached is None:
+        await ctx.require_session()
+        meta = {}
+        try:
+            meta = await ctx.client.get(
+                "le", f"{org_unit_id}/content/topics/{topic_id}"
+            ) or {}
+        except Exception:  # noqa: BLE001
+            pass
+        file_name = m.guess_filename(meta) if meta else None
+        dest = ctx.settings.cache_dir / str(org_unit_id) / str(topic_id) / (
+            file_name or f"topic-{topic_id}"
+        )
+        info = await ctx.client.download(
+            "le", f"{org_unit_id}/content/topics/{topic_id}/file", dest
+        )
+        cached = Path(info["path"])
+
+    if not renderer.is_renderable(cached):
+        raise RenderError(
+            f"{cached.name} cannot be rendered as an image. Only PDF and PPTX "
+            "are supported -- use read_content_file for its text instead."
+        )
+
+    png, meta = renderer.render_page(
+        cached, page, dpi=dpi, cache_dir=ctx.settings.render_dir
+    )
+    meta.update(
+        {
+            "org_unit_id": org_unit_id,
+            "topic_id": topic_id,
+            "course_name": await _safe_course_name(ctx, org_unit_id),
+        }
+    )
+    return png, meta
+
+
+def _find_cached(ctx: AppContext, org_unit_id: int, topic_id: int) -> Path | None:
+    folder = ctx.settings.cache_dir / str(org_unit_id) / str(topic_id)
+    if not folder.is_dir():
+        return None
+    for candidate in sorted(folder.iterdir()):
+        if candidate.is_file() and renderer.is_renderable(candidate):
+            return candidate
+    return None
+
+
+async def _safe_course_name(ctx: AppContext, org_unit_id: int) -> str:
+    stored = ctx.store.course_name(org_unit_id)
+    if stored:
+        return stored
+    try:
+        return await ctx.course_name(org_unit_id)
+    except Exception:  # noqa: BLE001
+        return f"Course {org_unit_id}"
+
+

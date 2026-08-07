@@ -1,8 +1,48 @@
 # 08 — API Probe Results
 
-> **STATUS: NOT YET RUN.** This is a template. Every value below is a placeholder until Phase 0 executes.
+> **STATUS: PARTIALLY RUN — the credential-free half is complete (2026-08-05).**
 >
-> Nothing in [`02-api-surface.md`](02-api-surface.md) or [`03-mcp-tools.md`](03-mcp-tools.md) should be treated as settled until this file is filled in with real data.
+> Several probe questions turn out not to need a MacID at all, and those are
+> answered below with real data. Everything requiring a logged-in session is
+> still `TBD` and needs `avenue-mcp login` followed by `scripts/probe.py`.
+>
+> Run `scripts/probe_unauth.py` to reproduce the credential-free findings.
+
+## ⚠️ Headline finding: the base URL in the original plan was wrong
+
+**`avenue.mcmaster.ca` is not Brightspace.** It is a static Apache landing page; every `/d2l/*` path returns a generic Apache 404 there. The real Brightspace host is:
+
+```
+https://avenue.cllmcmaster.ca
+```
+
+confirmed by `GET /d2l/api/versions/` returning live Valence JSON. The landing page gave it away in its own "Browser Check" link.
+
+Consequences, all now applied in code:
+
+| Item | Was | Now |
+|---|---|---|
+| `AVENUE_MCP_BASE_URL` default | `https://avenue.mcmaster.ca` | `https://avenue.cllmcmaster.ca` |
+| Login entry point | same as base URL | `AVENUE_MCP_LOGIN_URL` = `https://avenue.mcmaster.ca/login.php` |
+| Login success detection | one host | three-host chain (see B5) |
+
+Had this not been caught, **every single tool would have failed with `NotFoundError`** on first use.
+
+## ⚠️ Second finding: the liveness probe was unsuitable
+
+`GET /d2l/lp/auth/xsrf-tokens` returns **`200` with `application/json` even with no session at all.**
+
+The original design used it as the session liveness probe, which means `is_alive()` would report a dead session as alive, `require_session()` would pass, and every real call after it would fail confusingly — precisely the failure mode the error taxonomy exists to prevent.
+
+**Fixed:** the probe is now `GET /d2l/api/lp/1.0/users/whoami`, which is a real discriminator (anonymous → `403` + HTML; authenticated → `200` + JSON), and `is_alive()` requires *both* a 200 *and* a JSON object body.
+
+## ⚠️ Third finding: `403` needed splitting
+
+An anonymous request to an API route returns **`403` with a `text/html` body** — Brightspace's sign-in wall.
+
+The client mapped every `403` to `PermissionDeniedError`, whose message says *"this is not a login problem, so signing in again will not help."* For a logged-out user that is exactly backwards.
+
+**Fixed:** `403` + HTML → `SessionExpiredError` (auth wall); `403` + JSON → `PermissionDeniedError` (authenticated but genuinely not allowed). Both are pinned by tests in `tests/test_live_findings.py`.
 
 ## How to use this document
 
@@ -36,33 +76,61 @@ Raw responses go in `tests/fixtures/`, which is **gitignored**. Only the redacte
 | Instance | `https://avenue.mcmaster.ca` |
 | Account role | Student |
 | Courses enrolled (active) | TBD |
-| Test course type | TBD (e.g. a CS course with assignments + files) |
+| Test course type | TBD (e.g. a CS course with assignments + files + an active forum) |
 | Probe script version | TBD |
+
+---
+
+## Step 0a — existing D2L MCP server against Avenue
+
+**Run this first.** Twenty minutes, validates the entire auth premise before any code gets written. See [`06-roadmap.md`](06-roadmap.md).
+
+| Field | Value |
+|---|---|
+| Server tried | TBD (`RohanMuppa/brightspace-mcp-server`) |
+| Version | TBD |
+| Login succeeded? | TBD |
+| MFA handled automatically? | TBD |
+| Listed courses? | TBD |
+| Other tools that worked | TBD |
+| Failure mode, if any | TBD |
+
+**Verdict:** ⬜ Cookie-session auth works at McMaster · ⬜ Login blocked · ⬜ Auth works but permissions tighter than expected
+
+**What this changes:** TBD — if login failed, describe exactly where in the Entra chain it broke, since our login flow has to handle it.
 
 ---
 
 ## A. Bootstrap
 
-### A1 — API version discovery
+### A1 — API version discovery ✅ VERIFIED
 
 ```
-GET /d2l/api/versions/
+GET https://avenue.cllmcmaster.ca/d2l/api/versions/
 ```
 
 | Field | Value |
 |---|---|
-| Status | TBD |
-| Requires auth? | TBD |
-| `lp` LatestVersion | TBD |
-| `le` LatestVersion | TBD |
+| Status | **200** |
+| Requires auth? | **No** — fully unauthenticated |
+| Content-Type | `application/json; charset=UTF-8` |
+| `lp` LatestVersion | **1.62** (supported … 1.59–1.62) |
+| `le` LatestVersion | **1.96** (supported … 1.93–1.96) |
+| Product components | 15 (`bas`, `bfp`, `campusLife`, `customization`, …, `le`, `lp`) |
+| Browser-like UA required? | **No** — default `httpx` UA also gets 200 |
 
-**Response shape:**
+**Response shape (confirmed live):**
 
 ```json
-TBD
+[
+  {"ProductCode": "lp", "LatestVersion": "1.62", "SupportedVersions": ["1.0", "…", "1.62"]},
+  {"ProductCode": "le", "LatestVersion": "1.96", "SupportedVersions": ["1.0", "…", "1.96"]}
+]
 ```
 
-**Action:** these become the negotiated versions the client pins at startup.
+**Action taken:** version negotiation parses exactly this shape and pins `lp=1.62` / `le=1.96`. The `1.0` fallbacks stay as a safety net — `1.0` is in `SupportedVersions` for both, so a fallback cannot 404.
+
+Worth noting how far a hardcoded guess would have been off: the plan's illustrative `le` version was `1.89`; the instance runs `1.96`. This is the concrete argument for negotiating rather than pinning.
 
 ---
 
@@ -87,53 +155,7 @@ TBD
 
 ## B. Authentication behavior
 
-**The most operationally important section.** B0 gates the design; the rest determines how the client detects expiry, which is the difference between a clear error and a confusing JSON parse failure.
-
-### B0 — ⚠️ Which auth strategy works — **RUN THIS FIRST**
-
-The plan supports three strategies ([`01`](01-authentication.md)). This block decides which one the server pins, and whether the browser is a one-time login step or an hourly runtime dependency.
-
-**Test 1 — cookies alone.** Load `storage_state`, send the cookie jar, no `Authorization` header:
-
-```
-GET /d2l/api/lp/{v}/users/whoami
-```
-
-| Field | Value |
-|---|---|
-| **Status with cookies only** | **TBD** |
-| Content-Type returned | TBD |
-| Was any `Authorization` header needed? | TBD |
-
-**Test 2 — mint a bearer from the session.**
-
-```
-POST /d2l/lp/auth/xsrf-tokens      → grab referrerToken
-POST /d2l/lp/auth/oauth2/token     → cookies + X-Csrf-Token
-```
-
-| Field | Value |
-|---|---|
-| Status | TBD |
-| Response shape | TBD |
-| Field carrying the token | TBD |
-| Token lifetime (`expires_in`?) | TBD |
-| Does the minted token authorize `whoami`? | TBD |
-| **Can it be re-minted without a browser?** | **TBD** |
-
-**Test 3 — capture from frontend traffic.** During Playwright login, listen for requests to `/d2l/api/` and record whether an `Authorization: Bearer` header is present.
-
-| Field | Value |
-|---|---|
-| Does the frontend send a Bearer to `/d2l/api/`? | TBD |
-| Token captured successfully? | TBD |
-
-**Verdict:** ⬜ `CookieSessionAuth` · ⬜ `BearerTokenAuth` · ⬜ `CapturedBearerAuth`
-
-**Consequences to record:**
-- If cookies work → simplest client, browser is login-only, re-login roughly daily.
-- If only minting works → browser still login-only, but XSRF is on the critical path from the first call.
-- If only capture works → **the browser becomes an ~hourly runtime dependency.** Update the README, `docs/01`'s session-lifetime table, and Phase 1's "no browser" exit criterion to match, rather than quietly leaving a promise the software can't keep.
+**The most operationally important section** — it determines how the client detects expiry, which is the difference between a clear error and a confusing JSON parse failure.
 
 ### B1 — Cookies
 
@@ -146,35 +168,50 @@ POST /d2l/lp/auth/oauth2/token     → cookies + X-Csrf-Token
 | Load-balancer / affinity cookies? | TBD |
 | **Full jar required, or just the documented pair?** | TBD |
 
-### B2 — XSRF token
+### B2 — XSRF token ⚠️ PARTIALLY VERIFIED — and it broke an assumption
 
 ```
-GET /d2l/lp/auth/xsrf-tokens
+GET https://avenue.cllmcmaster.ca/d2l/lp/auth/xsrf-tokens
 ```
 
 | Question | Answer |
 |---|---|
-| Status | TBD |
-| Response shape | TBD |
-| Field name carrying the token | TBD (expected `referrerToken`) |
-| Also present in `localStorage` as `XSRF.Token`? | TBD |
-| Required on GET requests? | TBD (expected: no) |
+| Status, **unauthenticated** | **200** |
+| Content-Type, unauthenticated | **`application/json; charset=UTF-8`** |
+| Field name carrying the token | TBD (needs a session to inspect the body) |
+| Also in `localStorage` as `XSRF.Token`? | TBD |
+| Required on GET requests? | TBD (still expected: no) |
+| **Usable as a liveness probe?** | **NO — see below** |
 
-### B3 — Expiry behavior
+**This route answers 200 + JSON with no session at all**, so it cannot distinguish a live session from a dead one. The original design used it as exactly that, which would have made `is_alive()` return `True` for an expired session.
 
-**Method:** capture a session, wait for expiry (or invalidate by logging out elsewhere), then call a known-good route.
+**Action taken:** liveness moved to `GET /d2l/api/lp/1.0/users/whoami`, and `is_alive()` now requires a 200 *and* a JSON object body. The XSRF route is still used to fetch the token for the (gated) write path.
+
+### B3 — Unauthenticated / expiry behavior ✅ VERIFIED (no-session case)
+
+**Method:** call API routes on the Brightspace host with an empty cookie jar. This is the *no-session* case; the *expired-session* case still needs a real session to confirm it behaves identically.
+
+| Route | Status | Content-Type |
+|---|---|---|
+| `/d2l/api/lp/1.0/users/whoami` | **403** | **`text/html; charset=utf-8`** |
+| `/d2l/lp/auth/xsrf-tokens` | 200 | `application/json` |
+| `/d2l/home` | 200 | `text/html` |
 
 | Question | Answer |
 |---|---|
-| Status code on expired session | TBD (`401` / `302` / `200`) |
-| If `302` — redirect target host | TBD |
-| If `200` — `Content-Type` | TBD (`text/html`?) |
-| Body content on expiry | TBD |
-| **Is a bare status-code check sufficient?** | TBD |
+| Status code with no session | **403**, not 401, and **not** a redirect |
+| Redirect to SSO? | **No** — 0 hops; the host serves 403/200 directly |
+| **Is a bare status-code check sufficient?** | **No** |
 
-If the answer to the last row is "no," the content-type + redirect heuristic in [`01-authentication.md`](01-authentication.md) is load-bearing and must be implemented exactly as described.
+**Two things follow, and both are now implemented:**
 
-### B4 — Session lifetime
+1. **`403` is ambiguous and must be split by content type.** `403` + HTML is the sign-in wall (→ `SessionExpiredError`); `403` + JSON is a genuine permission denial (→ `PermissionDeniedError`). Mapping all `403`s to permission-denied told logged-out users that signing in would not help.
+
+2. **The redirect-based heuristic is not load-bearing here** — this host does not bounce anonymous API calls to SSO. The redirect and HTML-200 checks stay in the client as cheap defensive breadth (other D2L instances do behave that way), but the *actual* discriminator on this instance is `403` + content type.
+
+**Still TBD:** whether an *expired* session behaves identically to *no* session. If it returns `401` or a `302` instead, the existing checks already cover it.
+
+### B4 — Session lifetime and keepalive viability
 
 | Measurement | Value |
 |---|---|
@@ -185,17 +222,53 @@ If the answer to the last row is "no," the content-type + redirect heuristic in 
 
 **User-facing consequence:** TBD — "expect to log in roughly every ___".
 
-### B5 — SSO flow
+#### Keepalive decision
+
+**Method:** capture a session, issue `GET /d2l/lp/auth/xsrf-tokens` every ~20 minutes, and see whether the session outlives its measured idle window.
 
 | Question | Answer |
 |---|---|
-| Login URL chain | TBD |
-| Intermediate portal before Avenue? | TBD |
-| MFA method | TBD |
-| Reliable post-login success signal | TBD |
-| Typical time to complete login | TBD |
+| **Does activity extend the idle timer?** | TBD |
+| If yes — how long does an actively-pinged session survive? | TBD |
+| **Is there an absolute cap activity cannot extend?** | TBD |
+| Does the ping route itself count as activity? | TBD |
 
-The success-signal row matters: the login flow waits on it rather than on form selectors, so that an SSO redesign doesn't break login.
+**Verdict:** ⬜ Ship keepalive (set a non-zero default) · ⬜ Keep it default-off · ⬜ Drop it — activity doesn't extend anything
+
+If there's an absolute cap, say so in [`01-authentication.md`](01-authentication.md): keepalive then buys hours, not days, and users should know which.
+
+### B5 — SSO flow ✅ VERIFIED (chain), TBD (completion)
+
+`GET https://avenue.mcmaster.ca/login.php` → **302** to:
+
+```
+https://login.microsoftonline.com/44376307-b429-42ad-8c25-28cd496f4772/saml2
+  ?SAMLRequest=...
+  &RelayState=https%3A%2F%2Favenue.mcmaster.ca%2Flogin.php
+```
+
+| Question | Answer |
+|---|---|
+| Login URL chain | **3 hosts** — `avenue.mcmaster.ca/login.php` → `login.microsoftonline.com/<tenant>/saml2` → back via `RelayState` → `avenue.cllmcmaster.ca` |
+| Protocol | **SAML 2.0** (not OIDC) |
+| Identity provider | **Microsoft Entra ID**, tenant `44376307-b429-42ad-8c25-28cd496f4772` |
+| Intermediate portal before Brightspace? | **Yes** — the static landing page is both entry and SAML return point |
+| MFA method | TBD (needs a real sign-in) |
+| Reliable post-login success signal | **Session cookies scoped to `avenue.cllmcmaster.ca` + landing on `/d2l/home` there** |
+| Typical time to complete | TBD |
+
+**This confirms the correction in [`01-authentication.md`](01-authentication.md):** the IdP is Entra, and the token it issues is a SAML assertion consumed by *Brightspace*, with `RelayState` bringing the browser back. There is no point in that chain where a third-party app's own Entra token could be substituted.
+
+**Action taken:** the login flow now takes a separate `login_url` (the landing page) and detects success on `base_url` (the Brightspace host). Waiting on the wrong host is why a naive implementation appears to hang forever *after* a successful sign-in.
+
+### B6 — Headers ✅ VERIFIED
+
+| Question | Answer |
+|---|---|
+| Browser-like `User-Agent` required? | **No** |
+| Default `httpx` UA rejected? | **No** — `/d2l/api/versions/` returns 200 either way |
+
+A browser-like UA is still sent (harmless, and closer to what the frontend does), but nothing observed depends on it.
 
 ### B6 — Headers
 
@@ -448,19 +521,14 @@ GET /d2l/api/le/{v}/{orgUnitId}/news/
 ### C14 — Calendar / my events 🔵
 
 ```
-GET /d2l/api/le/{v}/calendar/events/myEvents/?orgUnitIdsCSV=…&startDateTime=…&endDateTime=…
-GET /d2l/api/le/{v}/{orgUnitId}/calendar/events/myEvents/?startDateTime=…&endDateTime=…
+GET /d2l/api/le/{v}/{orgUnitId}/calendar/events/myEvents/
 ```
 
 **Doing double duty: primary deadline source *and* the C7 fallback.**
 
-> **`startDateTime` and `endDateTime` are required** (plus `orgUnitIdsCSV` on the cross-course variant). A bare call returns `400`. Do not record that as "blocked" — it's a malformed request.
-
 | Field | Value |
 |---|---|
-| Status, cross-course variant | TBD |
-| Status, per-course variant | TBD |
-| **Does the cross-course variant work?** (saves N-1 requests) | TBD |
+| Status | TBD |
 | Events returned | TBD |
 | **Do assignment due dates appear here?** | TBD |
 | Do quiz due dates appear? | TBD |
@@ -472,14 +540,89 @@ The bolded row is the fallback test. If assignment due dates *don't* appear here
 
 ---
 
+### C14b — ⚠️ Quizzes
+
+```
+GET /d2l/api/le/{v}/{orgUnitId}/quizzes/
+```
+
+| Field | Value |
+|---|---|
+| **Status** | **TBD** |
+| Quizzes returned | TBD |
+| `StartDate` present? | TBD |
+| `DueDate` present? | TBD |
+| `EndDate` present? | TBD |
+| Attempts-allowed present? | TBD |
+
+**Verdict:** ⬜ Works · ⬜ Blocked
+
+**Do quiz due dates also appear in C14 (calendar)?** TBD — this is the fallback, and it matters more than the route itself. Deadlines survive a blocked quizzes route only if the calendar carries them.
+
+### C14c — ⚠️ My quiz attempts
+
+```
+GET /d2l/api/le/{v}/{orgUnitId}/quizzes/{quizId}/attempts/
+```
+
+| Field | Value |
+|---|---|
+| Status | TBD |
+| Own attempts visible? | TBD |
+| Scores included where released? | TBD |
+
+### C14d — Discussion forums 🔵
+
+```
+GET /d2l/api/le/{v}/{orgUnitId}/discussions/forums/
+```
+
+| Field | Value |
+|---|---|
+| Status | TBD |
+| Forums returned | TBD |
+
+### C14e — Forum topics 🔵
+
+```
+GET /d2l/api/le/{v}/{orgUnitId}/discussions/forums/{forumId}/topics/
+```
+
+| Field | Value |
+|---|---|
+| Status | TBD |
+| Topics returned | TBD |
+| Post counts present? | TBD |
+| Last-post timestamp present? | TBD |
+
+### C14f — Thread posts 🔵
+
+```
+GET /d2l/api/le/{v}/{orgUnitId}/discussions/forums/{forumId}/topics/{topicId}/posts/
+```
+
+**The RAG corpus's second source. Shape matters here.**
+
+| Field | Value |
+|---|---|
+| Status | TBD |
+| Posts returned | TBD |
+| Paged? | TBD |
+| **`ParentPostId` present?** | TBD — needed to reconstruct the reply tree |
+| Body format | TBD (HTML?) |
+| **Is author *role* distinguishable from author *name*?** | TBD |
+| Field carrying role, if any | TBD |
+| Post IDs monotonic? | TBD — determines whether `max_post_id` works as an incremental watermark |
+
+**Redaction reminder: do not paste real post text or author names into this file.** Record field names and shapes only.
+
+Two rows are load-bearing for [`04-rag-design.md`](04-rag-design.md): without `ParentPostId`, question+reply chunking isn't possible and threads must be chunked flat. If **role** is not directly available and only names are, that's a design problem — the index deliberately stores roles and not names, so the role has to be derivable (cross-reference against instructor enrollments, or fall back to no attribution at all).
+
 ### C15 — ⚠️ Class list
 
 ```
-GET /d2l/api/le/{v}/{orgUnitId}/classlist/
-GET /d2l/api/le/{v}/{orgUnitId}/classlist/paged/
+GET /d2l/api/lp/{v}/{orgUnitId}/classlist/
 ```
-
-> **Path corrected: `le`, not `lp`.** Probe both variants. A `404` here almost certainly means a wrong path, not a permission wall — record `403` vs `404` separately, because conflating them would degrade `get_class_list` for the wrong reason.
 
 | Field | Value |
 |---|---|
@@ -569,9 +712,13 @@ If both C15 and C16 are blocked, `get_class_list` reports instructor names from 
 | `grades/values/myGradeValues/` | 🔵 | TBD |
 | **`grades/`** | ⚠️ | **TBD** |
 | `news/` | 🔵 | TBD |
-| `calendar/events/myEvents/` (cross-course) | 🔵 | TBD |
-| `calendar/events/myEvents/` (per-course) | 🔵 | TBD |
-| `le/…/classlist/paged/` | ⚠️ | TBD |
+| `calendar/events/myEvents/` | 🔵 | TBD |
+| **`quizzes/`** | ⚠️ | **TBD** |
+| `quizzes/{q}/attempts/` | ⚠️ | TBD |
+| `discussions/forums/` | 🔵 | TBD |
+| `discussions/forums/{f}/topics/` | 🔵 | TBD |
+| `discussions/.../posts/` | 🔵 | TBD |
+| `classlist/` | ⚠️ | TBD |
 | `enrollments/orgUnits/*/users/` | ⚠️ | TBD |
 
 ### Feature viability
@@ -583,22 +730,31 @@ If both C15 and C16 are blocked, `get_class_list` reports instructor names from 
 | Read course files | TBD | |
 | **List assignments (full)** | TBD | Depends on C7 |
 | Upcoming deadlines | TBD | Depends on C7 or C14 |
+| **Quiz status** | TBD | Depends on C14b/C14c |
+| Quiz deadlines | TBD | Survives via C14 even if C14b blocked |
 | View grades | TBD | |
 | **Grade projection** | TBD | Depends on C12 |
 | Announcements | TBD | |
+| **Discussions as RAG corpus** | TBD | Depends on C14d–C14f |
+| Question+reply chunking | TBD | Needs `ParentPostId` (C14f) |
+| Role attribution without names | TBD | Needs role derivable (C14f) |
 | **Class list** | TBD | Depends on C15/C16 |
 | RAG over course files | TBD | Depends on C3–C6 |
+| Page rendering | TBD | Local-only; depends only on C6 downloads working |
+| **Session keepalive** | TBD | Depends on B4 |
 
 ### Required doc changes
 
-- [ ] **Record the B0 auth verdict in [`01-authentication.md`](01-authentication.md)** and delete the two strategies that lost
-- [ ] **If `CapturedBearerAuth` won**, correct every "no browser at runtime" claim in `01`, `05`, `06`, and the README
-- [ ] Update status column in [`02-api-surface.md`](02-api-surface.md)
+- [ ] Update status column in [`02-api-surface.md`](02-api-surface.md), including the priority ordering
 - [ ] Revise `list_assignments` in [`03-mcp-tools.md`](03-mcp-tools.md) if C7 blocked
 - [ ] Revise `analyze_grade_summary` if C12 blocked
+- [ ] Revise `list_quizzes` if C14b/C14c blocked
 - [ ] Revise `get_class_list` per C15/C16
+- [ ] Adjust discussion chunking in [`04-rag-design.md`](04-rag-design.md) if `ParentPostId` is absent
+- [ ] Decide the keepalive default in [`01`](01-authentication.md) and [`05`](05-architecture.md) per B4
 - [ ] Record session lifetime in [`01-authentication.md`](01-authentication.md)
 - [ ] Record expiry-detection method in [`01-authentication.md`](01-authentication.md)
+- [ ] Record the Step 0a result — it's the single most reusable finding here
 - [ ] Note any surprises not anticipated by the plan
 
 ### Fixtures captured

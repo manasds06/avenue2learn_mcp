@@ -1,14 +1,5 @@
-"""Authentication. The only place Playwright appears — one import, one blast radius."""
+from avenue_mcp.auth.base import AuthProvider
+from avenue_mcp.auth.login import interactive_login
+from avenue_mcp.auth.session import CookieSessionAuth, OAuthAuth
 
-from avenue_mcp.auth.base import AuthProvider, Strategy
-from avenue_mcp.auth.bearer import BearerTokenAuth, CapturedBearerAuth
-from avenue_mcp.auth.session import CookieSessionAuth, SessionManager
-
-__all__ = [
-    "AuthProvider",
-    "BearerTokenAuth",
-    "CapturedBearerAuth",
-    "CookieSessionAuth",
-    "SessionManager",
-    "Strategy",
-]
+__all__ = ["AuthProvider", "CookieSessionAuth", "OAuthAuth", "interactive_login"]

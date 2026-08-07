@@ -1,68 +1,72 @@
-"""list_announcements (docs/03-mcp-tools.md).
-
-The simplest end-to-end tool, and the one that proves the pattern:
-session -> client -> normalize -> structured JSON.
-"""
+"""list_announcements -- course news."""
 
 from __future__ import annotations
 
-from datetime import datetime
+import logging
 from typing import Any
 
-from avenue_mcp.client.d2l import D2LClient
-from avenue_mcp.util.dates import describe, parse_d2l_date
-from avenue_mcp.util.html import clean_body
+from avenue_mcp.client import models as m
+from avenue_mcp.context import AppContext
+from avenue_mcp.util.dates import describe, now_utc, parse_d2l
+from avenue_mcp.util.html import to_text_and_links, truncate
+
+log = logging.getLogger(__name__)
+
+_BODY_CAP = 4000
 
 
 async def list_announcements(
-    client: D2LClient,
-    *,
+    ctx: AppContext,
     org_unit_id: int,
     limit: int = 20,
     since: str | None = None,
 ) -> dict[str, Any]:
-    """Recent course announcements, newest first."""
-    tz = client.settings.timezone
-    base_url = client.settings.base_url
+    await ctx.require_session()
+    tz = ctx.settings.timezone
+    now = now_utc()
+    cutoff = parse_d2l(since) if since else None
 
-    raw = await client.get_json("le", f"{org_unit_id}/news/")
-    entries = raw if isinstance(raw, list) else []
-
-    since_dt: datetime | None = parse_d2l_date(since) if since else None
-
+    raw = await ctx.client.get_paged("le", f"{org_unit_id}/news/")
     items: list[dict[str, Any]] = []
-    for entry in entries:
+
+    for entry in raw:
         if not isinstance(entry, dict):
             continue
+        posted = parse_d2l(
+            m.pick(entry, "StartDate", "DatePosted", "CreatedDate", "PostedDate")
+        )
+        ends = parse_d2l(m.pick(entry, "EndDate"))
 
-        posted = parse_d2l_date(entry.get("StartDate") or entry.get("CreatedDate"))
-        if since_dt is not None and posted is not None and posted <= since_dt:
+        if ends is not None and ends < now:
+            continue  # expired
+        if cutoff is not None and posted is not None and posted <= cutoff:
             continue
 
-        # Bodies are HTML. Return clean text plus the links separately —
-        # raw markup wastes context, and dropping links loses the Zoom
-        # link or the reading the user actually needs.
-        body_html = (entry.get("Body") or {}).get("Html") or (entry.get("Body") or {}).get("Text")
-        text, links = clean_body(body_html, base_url=base_url)
+        body = m.pick(entry, "Body", "Content", default="")
+        if isinstance(body, dict):
+            body = m.pick(body, "Html", "Text", "Content", default="")
+        text, links = to_text_and_links(str(body or ""))
+        text, was_truncated = truncate(text, _BODY_CAP)
 
         items.append(
             {
-                "id": entry.get("Id"),
-                "title": entry.get("Title") or "",
+                "id": m.as_int(m.pick(entry, "Id", "NewsId")),
+                "title": m.pick(entry, "Title", "Subject", "Name"),
                 "body_text": text,
+                "truncated": was_truncated,
                 "posted_at": describe(posted, tz),
                 "links": links,
-                "is_pinned": bool(entry.get("IsPinned", False)),
             }
         )
 
-    # Newest first; undated items sort last rather than crashing the compare.
-    items.sort(key=lambda i: (i["posted_at"] or {}).get("utc") or "", reverse=True)
-    total = len(items)
+    items.sort(key=lambda a: a["posted_at"]["utc"] or "", reverse=True)
+    if limit > 0:
+        items = items[:limit]
 
     return {
         "org_unit_id": org_unit_id,
-        "announcements": items[:limit],
-        "count": min(total, limit),
-        "total_available": total,
+        "course_name": await ctx.course_name(org_unit_id),
+        "announcements": items,
+        "count": len(items),
+        "since": since,
     }

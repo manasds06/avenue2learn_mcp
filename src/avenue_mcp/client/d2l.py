@@ -1,27 +1,24 @@
-"""D2LClient — version negotiation, paging, throttling, retries, error mapping.
+"""D2L Valence REST client.
 
-Knows nothing about MCP. The tool layer calls this; this calls httpx.
+Knows nothing about MCP -- usable from a script or a test. Handles:
 
-The error mapping is the part worth reading carefully. Brightspace signals an
-expired session in three different ways (401, a 302 to the SSO host, or a 200
-whose body is an HTML login form), and a naive client parses that last one as
-JSON and reports a confusing failure. See docs/01 "Detecting expiry".
+* API version negotiation (never hardcode a version)
+* bookmark pagination (implemented once, generically)
+* throttling and jittered backoff
+* expiry detection that does not trust status codes alone
+* mapping HTTP to the typed error taxonomy
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from pathlib import Path
-from typing import Any
-from urllib.parse import urlsplit
+from typing import Any, Literal
+from urllib.parse import urlparse
 
 import httpx
 
-from avenue_mcp.auth.base import AuthProvider
-from avenue_mcp.auth.session import SessionManager
-from avenue_mcp.client.paging import MAX_PAGES, extract_items, paging_info
-from avenue_mcp.config import Settings, get_settings
+from avenue_mcp.auth.session import CookieSessionAuth
+from avenue_mcp.config import Settings
 from avenue_mcp.errors import (
     InvalidRequestError,
     NotFoundError,
@@ -29,292 +26,401 @@ from avenue_mcp.errors import (
     SessionExpiredError,
     UpstreamError,
 )
-from avenue_mcp.util.throttle import Throttle
+from avenue_mcp.util.throttle import Throttle, TTLCache, with_backoff
 
 log = logging.getLogger(__name__)
 
-VERSIONS_PATH = "/d2l/api/versions/"
+Component = Literal["lp", "le"]
 
-# Used only until /d2l/api/versions/ answers. Never used to build a real
-# request path — see negotiate_versions().
-_FALLBACK_VERSIONS = {"lp": "1.0", "le": "1.0"}
+# Fallbacks used only if /d2l/api/versions/ is unreachable. Conservative
+# on purpose -- 1.0 is universally supported.
+_FALLBACK_VERSIONS: dict[str, str] = {"lp": "1.0", "le": "1.0"}
 
 
 class D2LClient:
-    """Async client for the Valence REST API."""
+    """Thin async wrapper over the Valence API."""
 
-    def __init__(
-        self,
-        session: SessionManager | None = None,
-        settings: Settings | None = None,
-    ) -> None:
-        self.settings = settings or get_settings()
-        self.session = session or SessionManager(self.settings)
+    def __init__(self, auth: CookieSessionAuth, settings: Settings) -> None:
+        self.auth = auth
+        self.settings = settings
         self._versions: dict[str, str] | None = None
         self._throttle = Throttle(
-            max_concurrency=self.settings.max_concurrency,
-            min_interval_ms=self.settings.min_request_interval_ms,
+            settings.max_concurrency, settings.min_request_interval_ms
         )
+        self._cache = TTLCache(settings.cache_ttl_seconds)
 
-    # --- Versioning ------------------------------------------------------
+    # --- versions ---------------------------------------------------------
 
-    async def negotiate_versions(self) -> dict[str, str]:
-        """Pin API versions from the instance. Never hardcode them.
-
-        Versions advance with each Brightspace release and differ per
-        institution, so a hardcoded `1.57` is a time bomb. Cached for the
-        process lifetime; it changes only when McMaster upgrades.
-        """
+    async def versions(self) -> dict[str, str]:
+        """Negotiate versions once per process, then cache."""
         if self._versions is not None:
             return self._versions
+        try:
+            data = await self._raw_json("GET", "/d2l/api/versions/")
+        except Exception as exc:  # noqa: BLE001 -- fall back, don't die
+            log.warning("version negotiation failed (%s); using fallbacks", exc)
+            self._versions = dict(_FALLBACK_VERSIONS)
+            return self._versions
 
-        client, _ = await self.session.require_session()
-        response = await self._send(client, "GET", VERSIONS_PATH, provider=None)
-        payload = self._parse_json(response, VERSIONS_PATH)
-
-        versions: dict[str, str] = {}
-        if isinstance(payload, list):
-            for entry in payload:
+        found: dict[str, str] = {}
+        if isinstance(data, list):
+            for entry in data:
                 if not isinstance(entry, dict):
                     continue
-                code = entry.get("ProductCode") or entry.get("productCode")
-                latest = entry.get("LatestVersion") or entry.get("latestVersion")
-                if isinstance(code, str) and isinstance(latest, str):
-                    versions[code.lower()] = latest
-
-        self._versions = {**_FALLBACK_VERSIONS, **versions}
-        log.info("Negotiated API versions: %s", self._versions)
+                code = str(entry.get("ProductCode", "")).lower()
+                latest = entry.get("LatestVersion")
+                if code and isinstance(latest, str):
+                    found[code] = latest
+        self._versions = {**_FALLBACK_VERSIONS, **found}
+        log.info("API versions: %s", self._versions)
         return self._versions
 
-    async def path(self, component: str, route: str) -> str:
-        """Build `/d2l/api/{component}/{version}/{route}`.
+    async def version_for(self, component: Component) -> str:
+        return (await self.versions()).get(component, _FALLBACK_VERSIONS[component])
 
-        Trailing slashes in `route` are preserved — several Valence collection
-        routes behave differently without one.
-        """
-        versions = await self.negotiate_versions()
-        version = versions.get(component.lower(), _FALLBACK_VERSIONS.get(component.lower(), "1.0"))
-        return f"/d2l/api/{component.lower()}/{version}/{route.lstrip('/')}"
+    async def path(self, component: Component, suffix: str) -> str:
+        v = await self.version_for(component)
+        return f"/d2l/api/{component}/{v}/{suffix.lstrip('/')}"
 
-    # --- Request plumbing ------------------------------------------------
+    # --- requests ---------------------------------------------------------
 
-    def _is_login_redirect(self, response: httpx.Response) -> bool:
-        if response.status_code not in (301, 302, 303, 307, 308):
-            return False
-        location = response.headers.get("location", "")
-        if not location:
-            return False
-        host = urlsplit(location).netloc.lower() or urlsplit(str(response.url)).netloc.lower()
-        base_host = urlsplit(self.settings.base_url).netloc.lower()
-        # A redirect off-host, or to a login path on-host, means SSO.
-        return host != base_host or "login" in location.lower()
-
-    def _raise_for_status(self, response: httpx.Response, route: str) -> None:
-        status = response.status_code
-
-        if self._is_login_redirect(response):
-            raise SessionExpiredError()
-
-        if status == 200:
-            content_type = response.headers.get("content-type", "").lower()
-            # A JSON route answering with HTML is the login page.
-            if "text/html" in content_type:
-                raise SessionExpiredError()
-            return
-
-        if status in (401,):
-            raise SessionExpiredError()
-        if status == 403:
-            # Deliberately NOT SessionExpiredError. A 403 on a healthy session
-            # is a permissions fact; telling the user to log in again sends
-            # them down a dead end.
-            raise PermissionDeniedError(
-                f"Your Avenue account doesn't have access to {route} — it may be instructor-only."
-            )
-        if status == 404:
-            raise NotFoundError(f"Avenue has no such item at {route}.")
-        if status == 400:
-            raise InvalidRequestError(
-                f"Avenue rejected the request to {route}: {response.text[:200]}"
-            )
-        if status >= 500:
-            raise UpstreamError(f"Avenue returned {status} for {route}.")
-        if status >= 400:
-            raise UpstreamError(f"Avenue returned {status} for {route}.")
-
-    def _parse_json(self, response: httpx.Response, route: str) -> Any:
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise UpstreamError(
-                f"Avenue returned a non-JSON body for {route}."
-            ) from exc
-
-    async def _send(
+    async def get(
         self,
-        client: httpx.AsyncClient,
-        method: str,
-        path: str,
-        *,
-        provider: AuthProvider | None,
-        params: dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> httpx.Response:
-        """One request, throttled, with jittered backoff on 429/5xx."""
-        attempt = 0
-        while True:
-            attempt += 1
-
-            async def _once() -> httpx.Response:
-                request = client.build_request(method, path, params=params, **kwargs)
-                if provider is not None:
-                    await provider.authorize(request)
-                return await client.send(request)
-
-            try:
-                response = await self._throttle.run(_once)
-            except httpx.HTTPError as exc:
-                if attempt >= self._throttle.max_attempts:
-                    raise UpstreamError(f"Network error calling {path}: {exc}") from exc
-                await asyncio.sleep(self._throttle.backoff_delay(attempt))
-                continue
-
-            if response.status_code in (429,) or response.status_code >= 500:
-                if attempt >= self._throttle.max_attempts:
-                    self._raise_for_status(response, path)
-                    return response
-                retry_after = response.headers.get("retry-after")
-                delay = self._throttle.backoff_delay(
-                    attempt,
-                    float(retry_after) if retry_after and retry_after.isdigit() else None,
-                )
-                log.debug("Retrying %s after %.1fs (status %d)", path, delay, response.status_code)
-                await asyncio.sleep(delay)
-                continue
-
-            return response
-
-    # --- Public API ------------------------------------------------------
-
-    async def get_json(
-        self,
-        component: str,
-        route: str,
+        component: Component,
+        suffix: str,
         *,
         params: dict[str, Any] | None = None,
+        cache: bool = True,
     ) -> Any:
-        """GET a versioned Valence route and return parsed JSON."""
-        client, provider = await self.session.require_session()
-        path = await self.path(component, route)
-        response = await self._send(client, "GET", path, provider=provider, params=params)
-        self._raise_for_status(response, path)
-        return self._parse_json(response, path)
+        url = await self.path(component, suffix)
+        key = f"{url}?{sorted((params or {}).items())}"
+        if cache:
+            hit = self._cache.get(key)
+            if hit is not None:
+                return hit
+        data = await self._raw_json("GET", url, params=params)
+        if cache:
+            self._cache.put(key, data)
+        return data
 
     async def get_paged(
         self,
-        component: str,
-        route: str,
+        component: Component,
+        suffix: str,
         *,
         params: dict[str, Any] | None = None,
-        max_pages: int = MAX_PAGES,
+        cache: bool = True,
     ) -> list[Any]:
-        """Follow bookmark paging to exhaustion and return every item."""
-        client, provider = await self.session.require_session()
-        path = await self.path(component, route)
+        """Follow bookmark pagination to exhaustion.
+
+        Implemented once here. A per-call-site paging loop is how you silently
+        truncate a course list at page one.
+        """
+        url = await self.path(component, suffix)
+        base = dict(params or {})
+        key = f"PAGED {url}?{sorted(base.items())}"
+        if cache:
+            hit = self._cache.get(key)
+            if isinstance(hit, list):
+                return hit
 
         items: list[Any] = []
-        query = dict(params or {})
-        seen_bookmarks: set[str] = set()
+        bookmark: str | None = None
+        for page in range(self.settings.max_pages):
+            q = dict(base)
+            if bookmark:
+                q["bookmark"] = bookmark
+            data = await self._raw_json("GET", url, params=q)
 
-        for page in range(max_pages):
-            response = await self._send(client, "GET", path, provider=provider, params=query)
-            self._raise_for_status(response, path)
-            payload = self._parse_json(response, path)
-
-            items.extend(extract_items(payload))
-
-            bookmark, has_more = paging_info(payload)
-            if not has_more or not bookmark:
+            if isinstance(data, list):
+                items.extend(data)
+                break  # unpaged route
+            if not isinstance(data, dict):
                 break
-            # A server that echoes the same bookmark forever would otherwise
-            # spin until max_pages; stop as soon as we notice.
-            if bookmark in seen_bookmarks:
-                log.warning("Paging bookmark repeated on %s; stopping at page %d", path, page + 1)
-                break
-            seen_bookmarks.add(bookmark)
-            query["bookmark"] = bookmark
-        else:
-            log.warning("Hit the %d-page cap on %s; results may be truncated.", max_pages, path)
 
+            chunk = data.get("Items")
+            if isinstance(chunk, list):
+                items.extend(chunk)
+            elif isinstance(data.get("Objects"), list):
+                items.extend(data["Objects"])
+
+            paging = data.get("PagingInfo") or {}
+            has_more = bool(paging.get("HasMoreItems"))
+            next_bm = paging.get("Bookmark")
+            if not has_more or not next_bm or next_bm == bookmark:
+                break
+            bookmark = str(next_bm)
+            if page == self.settings.max_pages - 1:
+                log.warning("paging cap (%d) hit for %s", self.settings.max_pages, url)
+
+        if cache:
+            self._cache.put(key, items)
         return items
 
-    async def download_file(
+    async def post_multipart(
         self,
-        component: str,
-        route: str,
+        component: Component,
+        suffix: str,
         *,
-        destination: Path | None = None,
-        max_bytes: int | None = None,
-    ) -> tuple[dict[str, str], bytes | Path]:
-        """Fetch raw file bytes from a route that returns a body, not JSON.
+        data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+    ) -> Any:
+        """Used only by the gated write path."""
+        url = await self.path(component, suffix)
+        result = await self._raw_json("POST", url, data=data, files=files)
+        # A write invalidates anything we may have cached about this course --
+        # otherwise a submission can succeed while list_assignments keeps
+        # reporting "not_submitted" for the rest of the TTL.
+        self.clear_cache()
+        return result
 
-        Streams rather than buffering — lecture decks routinely run 20-80 MB,
-        and a whole course's worth held in memory at once hurts. Writes to
-        `destination` when given, otherwise returns the bytes.
+    async def download(self, component: Component, suffix: str, dest: Any) -> dict[str, Any]:
+        """Stream a file body to `dest` (a Path).
 
-        Aborts once `max_bytes` is exceeded rather than reading to the end:
-        the point of a cap is to not pay for the download.
+        Streams rather than buffers: lecture decks run 20-80 MB and buffering a
+        whole course hurts. Enforces the size cap so one pathological file
+        cannot stall a sync.
         """
-        client, provider = await self.session.require_session()
-        path = await self.path(component, route)
-        cap = max_bytes if max_bytes is not None else self.settings.max_file_bytes
+        from pathlib import Path
 
-        request = client.build_request("GET", path)
-        if provider is not None:
-            await provider.authorize(request)
+        dest = Path(dest)
 
-        async def _open() -> httpx.Response:
-            return await client.send(request, stream=True)
-
-        response = await self._throttle.run(_open)
+        # Defence in depth. Callers sanitize the filename (models.safe_filename),
+        # but this is the single choke point where remote-controlled bytes get
+        # written to a remote-influenced path, so it refuses to write outside the
+        # cache root regardless of how the path was built.
+        root = Path(self.settings.cache_dir).resolve()
         try:
-            self._raise_for_status(response, path)
+            resolved = dest.resolve()
+            resolved.relative_to(root)
+        except (ValueError, OSError) as exc:
+            raise InvalidRequestError(
+                f"Refusing to write outside the cache directory: {dest}"
+            ) from exc
+        dest = resolved
 
-            declared = response.headers.get("content-length")
-            if declared and declared.isdigit() and int(declared) > cap:
-                raise InvalidRequestError(
-                    f"File at {route} is {int(declared) // (1024 * 1024)} MB, over the "
-                    f"{cap // (1024 * 1024)} MB cap. Raise AVENUE_MCP_MAX_FILE_MB to fetch it."
-                )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        url = await self.path(component, suffix)
+        cap = self.settings.max_file_mb * 1024 * 1024
+        client = self.auth.client(self.settings.download_timeout_seconds)
 
-            headers = dict(response.headers)
-            total = 0
+        async with self._throttle:
+            async with client.stream(
+                "GET", url, timeout=self.settings.download_timeout_seconds
+            ) as resp:
+                self._raise_for_session(resp, url)
+                if resp.status_code >= 400:
+                    # The body has not been read on a streaming response, and
+                    # _raise_for_status touches resp.text to build its message.
+                    # Without this, every download failure surfaced as
+                    # httpx.ResponseNotRead instead of SessionExpiredError /
+                    # PermissionDeniedError -- i.e. an expired session mid-sync
+                    # produced 40 unintelligible errors instead of "log in again".
+                    await resp.aread()
+                self._raise_for_status(resp, url)
 
-            if destination is not None:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                with destination.open("wb") as fh:
-                    async for chunk in response.aiter_bytes():
-                        total += len(chunk)
+                ctype = resp.headers.get("content-type", "")
+                filename = _filename_from(resp.headers.get("content-disposition"))
+                declared = resp.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > cap:
+                    raise InvalidRequestError(
+                        f"File is {int(declared) // 1048576} MB, over the "
+                        f"{self.settings.max_file_mb} MB cap."
+                    )
+
+                total = 0
+                tmp = dest.with_suffix(dest.suffix + ".part")
+                with tmp.open("wb") as fh:
+                    async for block in resp.aiter_bytes(65536):
+                        total += len(block)
                         if total > cap:
                             fh.close()
-                            destination.unlink(missing_ok=True)
+                            tmp.unlink(missing_ok=True)
                             raise InvalidRequestError(
-                                f"File at {route} exceeded the {cap // (1024 * 1024)} MB cap."
+                                f"File exceeded the {self.settings.max_file_mb} MB cap."
                             )
-                        fh.write(chunk)
-                return headers, destination
+                        fh.write(block)
+                tmp.replace(dest)
 
-            buffer = bytearray()
-            async for chunk in response.aiter_bytes():
-                total += len(chunk)
-                if total > cap:
-                    raise InvalidRequestError(
-                        f"File at {route} exceeded the {cap // (1024 * 1024)} MB cap."
-                    )
-                buffer.extend(chunk)
-            return headers, bytes(buffer)
-        finally:
-            await response.aclose()
+        return {
+            "path": str(dest),
+            "bytes": total,
+            "mime_type": ctype.split(";")[0].strip() or None,
+            "filename": filename,
+        }
 
-    async def aclose(self) -> None:
-        await self.session.aclose()
+    # --- plumbing ---------------------------------------------------------
+
+    async def _raw_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
+    ) -> Any:
+        client = self.auth.client(self.settings.request_timeout_seconds)
+        headers = await self.auth.headers_for(method)
+
+        async def attempt() -> Any:
+            async with self._throttle:
+                resp = await client.request(
+                    method,
+                    url,
+                    params=_clean(params),
+                    data=data,
+                    files=files,
+                    headers=headers,
+                )
+            self._raise_for_session(resp, url)
+            self._raise_for_status(resp, url)
+            if not resp.content:
+                return None
+            try:
+                return resp.json()
+            except ValueError as exc:
+                # A 200 that isn't JSON on an API route is not data. Returning
+                # the raw text meant get_paged matched neither list nor dict,
+                # returned [], and CACHED that empty list -- so a malformed
+                # response degraded to "you have no courses" for five minutes
+                # instead of surfacing an error. (The HTML case is already
+                # caught earlier as an expired session.)
+                if url.startswith("/d2l/api/"):
+                    raise UpstreamError(
+                        f"Avenue returned a non-JSON body for {url}."
+                    ) from exc
+                return resp.text
+
+        return await with_backoff(
+            attempt,
+            max_attempts=self.settings.max_retries,
+            should_retry=_retryable,
+            retry_after=_retry_after,
+        )
+
+    @staticmethod
+    def _raise_for_session(resp: httpx.Response, url: str) -> None:
+        """Expiry detection that does not trust the status code alone.
+
+        Brightspace may answer an expired session with a 302 to SSO, or a 200
+        whose body is an HTML login form, rather than a clean 401. A naive
+        client parses that HTML as JSON and reports a confusing error.
+        """
+        if 300 <= resp.status_code < 400:
+            loc = resp.headers.get("location", "")
+            host = urlparse(loc).netloc.lower() if loc else ""
+            api_host = urlparse(str(resp.request.url)).netloc.lower()
+            if not loc or (host and host != api_host) or "login" in loc.lower():
+                raise SessionExpiredError(
+                    f"Avenue redirected {url} to sign-in; the session has expired."
+                )
+        if resp.status_code == 200 and url.startswith("/d2l/api/"):
+            ctype = resp.headers.get("content-type", "").lower()
+            if "text/html" in ctype:
+                raise SessionExpiredError(
+                    f"Avenue returned a login page for {url}; the session has expired."
+                )
+
+    @staticmethod
+    def _raise_for_status(resp: httpx.Response, url: str) -> None:
+        code = resp.status_code
+        if code < 400:
+            return
+        # Belt and braces: on a streaming response the body may still be
+        # unread, and reaching for it would raise ResponseNotRead and mask the
+        # real status.
+        try:
+            detail = _short(resp.text)
+        except httpx.ResponseNotRead:
+            detail = ""
+        ctype = resp.headers.get("content-type", "").lower()
+        if code == 401:
+            raise SessionExpiredError(f"Not authenticated for {url}.")
+        if code == 403:
+            # A 403 means two very different things, and getting it backwards
+            # sends the user down a dead end either way.
+            #
+            # Verified against the live host: an ANONYMOUS request to an API
+            # route returns 403 with a text/html body -- Brightspace's auth
+            # wall. Treating that as "permission denied" would tell a logged-out
+            # user that signing in will not help, which is exactly wrong.
+            #
+            # A genuine permission denial from an authenticated session comes
+            # back as JSON, because the API is answering us rather than
+            # bouncing us to a login page.
+            if "html" in ctype:
+                raise SessionExpiredError(
+                    f"Avenue returned its sign-in wall for {url}; "
+                    "the session is not valid."
+                )
+            raise PermissionDeniedError(f"Access denied for {url}. {detail}".strip())
+        if code == 404:
+            raise NotFoundError(f"Not found: {url}. {detail}".strip())
+        if code in (400, 422):
+            raise InvalidRequestError(f"Bad request to {url}. {detail}".strip())
+        if code == 413:
+            raise InvalidRequestError(f"Request too large for {url}.")
+        if code == 429:
+            raise _RateLimited(resp)
+        raise UpstreamError(f"Avenue returned {code} for {url}. {detail}".strip())
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
+
+
+class _RateLimited(UpstreamError):
+    """Internal: carries Retry-After so backoff can honor it."""
+
+    def __init__(self, resp: httpx.Response) -> None:
+        super().__init__("Rate limited by Avenue.")
+        self.retry_after = resp.headers.get("retry-after")
+
+
+def _retryable(exc: BaseException) -> bool:
+    if isinstance(exc, _RateLimited):
+        return True
+    if isinstance(exc, UpstreamError):
+        return True
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    # Never retry auth, permission, 404, or bad-request failures.
+    return False
+
+
+def _retry_after(exc: BaseException) -> float | None:
+    if isinstance(exc, _RateLimited) and exc.retry_after:
+        try:
+            return max(0.0, float(exc.retry_after))
+        except ValueError:
+            return None
+    return None
+
+
+def _clean(params: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not params:
+        return None
+    return {k: v for k, v in params.items() if v is not None}
+
+
+def _short(text: str, limit: int = 200) -> str:
+    t = " ".join((text or "").split())
+    if "<html" in t.lower():
+        return ""
+    return t[:limit]
+
+
+def _filename_from(disposition: str | None) -> str | None:
+    if not disposition:
+        return None
+    for part in disposition.split(";"):
+        part = part.strip()
+        for key in ("filename*=", "filename="):
+            if part.lower().startswith(key):
+                val = part[len(key):].strip().strip('"')
+                if val.lower().startswith("utf-8''"):
+                    from urllib.parse import unquote
+
+                    val = unquote(val[7:])
+                return val or None
+    return None

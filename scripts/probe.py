@@ -1,351 +1,337 @@
-"""Phase 0 probe (docs/06-roadmap.md, docs/08-api-probe-results.md).
+#!/usr/bin/env python3
+"""Phase 0 probe: find out what a student account can actually reach.
 
-Throwaway diagnostic, not shipped and not polished. It answers two questions:
+Four routes are documented as instructor-scope, and two features hinge on them
+(assignments and grade projection). Building the tool layer against guesses is
+how you ship a tool description that lies to the model.
 
-  B0. Which auth strategy does Avenue accept — cookies, a bearer minted from
-      the session, or only a bearer captured from frontend traffic? This
-      decides whether the browser is a one-time login or an hourly runtime
-      dependency, so it runs first and everything else depends on it.
+Run AFTER `avenue-mcp login`:
 
-  C*. Which of the uncertain routes can a student account actually reach?
+    python scripts/probe.py --course ORG_UNIT_ID
+    python scripts/probe.py --course ORG_UNIT_ID --save-fixtures
 
-Direction matters: probe -> docs, never docs -> probe. If a route is blocked,
-the tool description changes to match. Reinterpreting a 403 to preserve a
-planned feature is the failure mode this exists to prevent.
+Writes a redacted summary to stdout and (optionally) raw responses to
+tests/fixtures/ -- which is gitignored, because raw responses contain real IDs
+and names.
 
-Run:  python -m avenue_mcp probe        (after `python -m avenue_mcp login`)
+Findings go into docs/08-api-probe-results.md. Direction matters: probe -> docs,
+never docs -> probe.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import sys
-from dataclasses import dataclass, field
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-import httpx
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from avenue_mcp.auth.bearer import TOKEN_PATH, XSRF_PATH, BearerTokenAuth, fetch_xsrf_token
-from avenue_mcp.auth.filelock import describe_permissions
-from avenue_mcp.auth.session import CookieSessionAuth, SessionManager
-from avenue_mcp.client.d2l import VERSIONS_PATH, D2LClient
-from avenue_mcp.client.paging import extract_items, paging_info
-from avenue_mcp.config import get_settings
-from avenue_mcp.errors import AvenueMCPError, NoSessionError
-from avenue_mcp.util.dates import to_utc_param, utcnow
+from avenue_mcp.config import get_settings  # noqa: E402
+from avenue_mcp.context import AppContext  # noqa: E402
+from avenue_mcp.errors import AvenueMCPError, PermissionDeniedError  # noqa: E402
 
-FIXTURE_DIR = Path("tests/fixtures")
-
-# Fields that must never reach a committed file. Raw bodies go to the
-# gitignored fixture dir; only shapes and status codes get summarised.
-_PII_KEYS = {
-    "emailaddress", "email", "username", "orgdefinedid", "firstname",
-    "lastname", "displayname", "profileidentifier", "userid", "identifier",
-}
+FIXTURES = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
 
 
-@dataclass
 class Probe:
-    """One route's result."""
+    def __init__(self, ctx: AppContext, save: bool) -> None:
+        self.ctx = ctx
+        self.save = save
+        self.results: list[dict[str, Any]] = []
 
-    label: str
-    method: str
-    path: str
-    status: int | None = None
-    content_type: str | None = None
-    ok: bool = False
-    item_count: int | None = None
-    keys: list[str] = field(default_factory=list)
-    paged: bool | None = None
-    note: str = ""
-    error: str = ""
-
-    def verdict(self) -> str:
-        if self.ok:
-            return "WORKS"
-        if self.status == 403:
-            return "BLOCKED (403)"
-        if self.status == 404:
-            return "NOT FOUND (404) — check the path before concluding 'blocked'"
-        if self.status == 400:
-            return "BAD REQUEST (400) — likely missing a required parameter"
-        if self.status is None:
-            return f"ERROR: {self.error}"
-        return f"HTTP {self.status}"
-
-
-def shape_of(payload: Any, depth: int = 0) -> Any:
-    """Describe a response's structure without its values."""
-    if depth > 3:
-        return "..."
-    if isinstance(payload, dict):
-        return {k: shape_of(v, depth + 1) for k, v in list(payload.items())[:25]}
-    if isinstance(payload, list):
-        return [shape_of(payload[0], depth + 1)] if payload else []
-    return type(payload).__name__
-
-
-def redact(payload: Any) -> Any:
-    """Strip obvious PII so a sample can be pasted into docs/08."""
-    if isinstance(payload, dict):
-        return {
-            k: ("<REDACTED>" if k.lower() in _PII_KEYS else redact(v))
-            for k, v in payload.items()
-        }
-    if isinstance(payload, list):
-        return [redact(v) for v in payload[:2]]
-    return payload
-
-
-class Prober:
-    def __init__(self) -> None:
-        self.settings = get_settings()
-        self.session = SessionManager(self.settings)
-        self.client = D2LClient(self.session, self.settings)
-        self.results: list[Probe] = []
-        self.strategy: str = "unresolved"
-        self.versions: dict[str, str] = {}
-        FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-
-    def _save(self, label: str, payload: Any) -> None:
-        """Raw response to the gitignored fixture dir — the Phase 1-3 test corpus."""
-        safe = label.replace("/", "_").replace(" ", "_")
-        (FIXTURE_DIR / f"{safe}.json").write_text(
-            json.dumps(payload, indent=2)[:2_000_000], encoding="utf-8"
-        )
-
-    async def probe(
-        self,
-        label: str,
-        component: str,
-        route: str,
-        *,
-        params: dict[str, Any] | None = None,
-        note: str = "",
-    ) -> Probe:
-        result = Probe(label=label, method="GET", path=f"/d2l/api/{component}/{{v}}/{route}", note=note)
+    async def run(self, label: str, component: str, suffix: str, *, paged: bool = False) -> Any:
+        entry: dict[str, Any] = {"label": label, "route": f"{component}/{suffix}"}
         try:
-            path = await self.client.path(component, route)
-            result.path = path
-            http, provider = await self.session.require_session()
-            response = await self.client._send(http, "GET", path, provider=provider, params=params)
-            result.status = response.status_code
-            result.content_type = response.headers.get("content-type", "")
-
-            if response.status_code == 200 and "json" in (result.content_type or ""):
-                payload = response.json()
-                result.ok = True
-                items = extract_items(payload)
-                result.item_count = len(items) if items or isinstance(payload, list) else None
-                bookmark, has_more = paging_info(payload)
-                result.paged = bookmark is not None or has_more
-                sample = items[0] if items else payload
-                if isinstance(sample, dict):
-                    result.keys = sorted(sample.keys())
-                self._save(label, redact(payload))
-        except AvenueMCPError as exc:
-            result.error = f"{type(exc).__name__}: {exc.message}"
-        except httpx.HTTPError as exc:
-            result.error = f"network: {exc}"
-        except Exception as exc:  # a probe must never die on one bad route
-            result.error = f"{type(exc).__name__}: {exc}"
-
-        self.results.append(result)
-        print(f"  {result.verdict():<24} {label}")
-        return result
-
-    # --- B0: the question that gates the design --------------------------
-
-    async def probe_auth(self) -> None:
-        print("\n=== B0. Auth strategy (run first — gates everything) ===\n")
-
-        http = await self.session.client()
-
-        # Test 1: cookies alone.
-        cookie_auth = CookieSessionAuth()
-        cookies_work = await cookie_auth.is_alive(http)
-        print(f"  cookies alone -> whoami      : {'WORKS' if cookies_work else 'rejected'}")
-
-        # Test 2: mint a bearer from the session.
-        xsrf = await fetch_xsrf_token(http)
-        print(f"  GET {XSRF_PATH:<28}: {'token received' if xsrf else 'no token'}")
-
-        minted = BearerTokenAuth()
-        token = await minted.mint(http)
-        print(f"  POST {TOKEN_PATH:<27}: {'minted a bearer' if token else 'failed'}")
-
-        # Test 3: a bearer captured during login.
-        captured = self.session._load_captured_bearer()
-        captured_works = bool(captured) and await captured.is_alive(http)
-        print(
-            "  captured bearer from login   : "
-            + ("present and valid" if captured_works else "absent or expired")
-        )
-
-        if cookies_work:
-            self.strategy = "CookieSessionAuth"
-        elif token:
-            self.strategy = "BearerTokenAuth"
-        elif captured_works:
-            self.strategy = "CapturedBearerAuth"
-        else:
-            self.strategy = "NONE — all three rejected"
-
-        print(f"\n  VERDICT: {self.strategy}")
-        if self.strategy == "CapturedBearerAuth":
-            print(
-                "  ** The browser is an ~hourly runtime dependency. Update the\n"
-                "     README, docs/01's lifetime table, and Phase 1's 'no browser'\n"
-                "     exit criterion to match."
-            )
-        elif self.strategy.startswith(("Cookie", "Bearer")):
-            print("  ** The browser stays a one-time login step. Re-login roughly daily.")
-
-    # --- Everything else --------------------------------------------------
-
-    async def probe_bootstrap(self) -> None:
-        print("\n=== A. Bootstrap ===\n")
-        self.versions = await self.client.negotiate_versions()
-        print(f"  versions negotiated          : {self.versions}")
-        await self.probe("A2-whoami", "lp", "users/whoami")
-
-    async def probe_courses(self) -> list[dict[str, Any]]:
-        print("\n=== C1-C2. Courses ===\n")
-        # Server-side filtering: no client-side sifting, no N+1 enrichment.
-        result = await self.probe(
-            "C1-myenrollments",
-            "lp",
-            "enrollments/myenrollments/",
-            params={"isActive": "true", "canAccess": "true"},
-            note="server-side filtered",
-        )
-        if not result.ok:
-            return []
-
-        raw = json.loads((FIXTURE_DIR / "C1-myenrollments.json").read_text(encoding="utf-8"))
-        courses: list[dict[str, Any]] = []
-        for item in extract_items(raw):
-            org = (item or {}).get("OrgUnit") or {}
-            if org.get("Id"):
-                courses.append(
-                    {
-                        "id": org["Id"],
-                        "name": org.get("Name", ""),
-                        "type": (org.get("Type") or {}).get("Name", ""),
-                    }
-                )
-        print(f"  active enrollments returned  : {len(courses)}")
-        types = sorted({c["type"] for c in courses})
-        print(f"  org unit types present       : {types}")
-        return courses
-
-    async def probe_course_routes(self, org_unit_id: int) -> None:
-        print(f"\n=== C3-C16. Course-scoped routes (org unit {org_unit_id}) ===\n")
-
-        await self.probe("C2-course-details", "lp", f"courses/{org_unit_id}")
-        await self.probe("C3-content-root", "le", f"{org_unit_id}/content/root/")
-        await self.probe("C7-dropbox-folders", "le", f"{org_unit_id}/dropbox/folders/",
-                         note="Instructor-scope claim withdrawn; expected to work")
-        await self.probe("C11-myGradeValues", "le", f"{org_unit_id}/grades/values/myGradeValues/")
-        await self.probe("C12-grade-structure", "le", f"{org_unit_id}/grades/",
-                         note="gates the grade PROJECTION only")
-        await self.probe("C13-news", "le", f"{org_unit_id}/news/")
-
-        # Calendar: startDateTime/endDateTime are REQUIRED. A bare call 400s,
-        # and that must not be recorded as "blocked".
-        now = utcnow()
-        window = {
-            "startDateTime": to_utc_param(now - timedelta(days=30)),
-            "endDateTime": to_utc_param(now + timedelta(days=90)),
-        }
-        await self.probe("C14a-calendar-per-course", "le",
-                         f"{org_unit_id}/calendar/events/myEvents/", params=window)
-
-        # Classlist lives under le, not lp. A 404 here means a wrong path.
-        await self.probe("C15-classlist", "le", f"{org_unit_id}/classlist/")
-        await self.probe("C15b-classlist-paged", "le", f"{org_unit_id}/classlist/paged/")
-        await self.probe("C16-role-enrollments", "lp",
-                         f"enrollments/orgUnits/{org_unit_id}/users/")
-
-    async def probe_cross_course_calendar(self, course_ids: list[int]) -> None:
-        """The route that turns an N-request fan-out into one call."""
-        if not course_ids:
-            return
-        print("\n=== C14b. Cross-course calendar (one request for all courses) ===\n")
-        now = utcnow()
-        await self.probe(
-            "C14b-calendar-cross-course",
-            "le",
-            "calendar/events/myEvents/",
-            params={
-                "orgUnitIdsCSV": ",".join(str(i) for i in course_ids),
-                "startDateTime": to_utc_param(now - timedelta(days=30)),
-                "endDateTime": to_utc_param(now + timedelta(days=90)),
-            },
-            note="replaces per-course fan-out",
-        )
-
-    def report(self) -> None:
-        print("\n" + "=" * 70)
-        print("SUMMARY — transcribe into docs/08-api-probe-results.md")
-        print("=" * 70)
-        print(f"\nAuth strategy : {self.strategy}")
-        print(f"API versions  : {self.versions}")
-        print(f"Session file  : {describe_permissions(self.settings.session_path)[:200]}")
-        print(f"\nFixtures saved to {FIXTURE_DIR}/ (gitignored)\n")
-
-        print(f"{'ROUTE':<30} {'STATUS':<28} ITEMS")
-        print("-" * 70)
-        for r in self.results:
-            count = "" if r.item_count is None else str(r.item_count)
-            print(f"{r.label:<30} {r.verdict():<28} {count}")
-
-        blocked = [r for r in self.results if not r.ok]
-        if blocked:
-            print("\nNot working — decide the honest degraded shape for each:")
-            for r in blocked:
-                print(f"  - {r.label}: {r.verdict()}")
-                if r.note:
-                    print(f"      note: {r.note}")
-
-        print("\nDo not adjust a tool's promises to fit a hoped-for reading of these.")
-        print("Update the docs from the results, not the other way around.\n")
-
-    async def run(self) -> int:
-        if not self.session.has_session():
-            print("Not logged in. Run `python -m avenue_mcp login` first.", file=sys.stderr)
-            return 1
-
-        try:
-            await self.probe_auth()
-            await self.probe_bootstrap()
-            courses = await self.probe_courses()
-
-            if courses:
-                await self.probe_course_routes(int(courses[0]["id"]))
-                await self.probe_cross_course_calendar([int(c["id"]) for c in courses])
+            if paged:
+                data = await self.ctx.client.get_paged(component, suffix, cache=False)  # type: ignore[arg-type]
             else:
-                print("\nNo active courses returned — skipping course-scoped probes.")
-
-            self.report()
-            return 0
-        except NoSessionError as exc:
-            print(f"\n{exc.to_text()}", file=sys.stderr)
-            return 1
+                data = await self.ctx.client.get(component, suffix, cache=False)  # type: ignore[arg-type]
+            entry["status"] = "OK"
+            entry["shape"] = describe_shape(data)
+            entry["count"] = len(data) if isinstance(data, list) else None
+            self._save(label, data)
+            print(f"  [OK]      {label}: {entry['shape']}")
+            return data
+        except PermissionDeniedError as exc:
+            entry["status"] = "BLOCKED (403)"
+            entry["detail"] = str(exc)[:200]
+            print(f"  [BLOCKED] {label}: 403 -- instructor-only on this instance")
+        except AvenueMCPError as exc:
+            entry["status"] = type(exc).__name__
+            entry["detail"] = str(exc)[:200]
+            print(f"  [FAIL]    {label}: {type(exc).__name__}: {str(exc)[:120]}")
+        except Exception as exc:  # noqa: BLE001
+            entry["status"] = f"ERROR {type(exc).__name__}"
+            entry["detail"] = str(exc)[:200]
+            print(f"  [ERROR]   {label}: {type(exc).__name__}: {str(exc)[:120]}")
         finally:
-            await self.client.aclose()
+            self.results.append(entry)
+        return None
+
+    def _save(self, label: str, data: Any) -> None:
+        if not self.save:
+            return
+        FIXTURES.mkdir(parents=True, exist_ok=True)
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)
+        (FIXTURES / f"{safe}.json").write_text(
+            json.dumps(data, indent=2, default=str), encoding="utf-8"
+        )
 
 
-async def main_async() -> int:
-    return await Prober().run()
+def describe_shape(data: Any, depth: int = 0) -> str:
+    """Field names and types only -- never values. This output is meant to be
+    safe to paste into a committed document."""
+    if depth > 2:
+        return "..."
+    if isinstance(data, list):
+        if not data:
+            return "[] (empty)"
+        return f"[{len(data)} x {describe_shape(data[0], depth + 1)}]"
+    if isinstance(data, dict):
+        keys = sorted(data.keys())[:14]
+        return "{" + ", ".join(keys) + ("..." if len(data) > 14 else "") + "}"
+    return type(data).__name__
 
 
-def main() -> int:
-    return asyncio.run(main_async())
+async def main() -> int:
+    ap = argparse.ArgumentParser(description="Phase 0 API probe")
+    ap.add_argument("--course", type=int, help="org_unit_id to probe (default: first active)")
+    ap.add_argument("--save-fixtures", action="store_true", help="Write raw responses")
+    ap.add_argument("--out", type=Path, help="Write the redacted summary as JSON")
+    args = ap.parse_args()
+
+    settings = get_settings()
+    ctx = AppContext(settings)
+    probe = Probe(ctx, args.save_fixtures)
+
+    print(f"\nProbing {settings.base_url}")
+    print("=" * 72)
+
+    # --- auth -------------------------------------------------------------
+    print("\nB. AUTHENTICATION")
+    if not ctx.auth.session_present:
+        print("  No session. Run `avenue-mcp login` first.", file=sys.stderr)
+        return 1
+
+    state = ctx.auth.load_state()
+    cookies = [c.get("name") for c in state.get("cookies", [])]
+    print(f"  cookies present: {len(cookies)}")
+    print(f"  names: {sorted(set(cookies))}")
+    print(f"  has d2lSessionVal: {'d2lSessionVal' in cookies}")
+    print(f"  has d2lSecureSessionVal: {'d2lSecureSessionVal' in cookies}")
+
+    alive = await ctx.auth.is_alive()
+    print(f"  liveness probe: {'OK' if alive else 'FAILED'}")
+    if not alive:
+        print("  Session appears dead. Re-run `avenue-mcp login`.", file=sys.stderr)
+        return 1
+    token = await ctx.auth.xsrf_token()
+    print(f"  xsrf token obtained: {bool(token)}")
+    print(f"  session age: {ctx.auth.session_age_minutes} min")
+
+    # --- bootstrap --------------------------------------------------------
+    print("\nA. BOOTSTRAP")
+    versions = await ctx.client.versions()
+    print(f"  versions: lp={versions.get('lp')} le={versions.get('le')}")
+    await probe.run("whoami", "lp", "users/whoami")
+
+    # --- courses ----------------------------------------------------------
+    print("\nC1-C2. COURSES")
+    enrollments = await probe.run(
+        "myenrollments", "lp", "enrollments/myenrollments/", paged=True
+    )
+
+    org_unit_id = args.course
+    if org_unit_id is None and isinstance(enrollments, list):
+        from avenue_mcp.client import models as m
+
+        for entry in enrollments:
+            ou = m.enrollment_org_unit(entry)
+            if isinstance(ou, dict) and m.is_course_offering(ou):
+                candidate = m.as_int(m.pick(ou, "Id", "OrgUnitId"))
+                if candidate:
+                    org_unit_id = candidate
+                    break
+
+    if org_unit_id is None:
+        print("\nNo course to probe. Pass --course ORG_UNIT_ID.", file=sys.stderr)
+        return 1
+    print(f"\n  probing course org_unit_id={org_unit_id} (redacted in output)")
+    await probe.run("course_details", "lp", f"courses/{org_unit_id}")
+
+    # --- content ----------------------------------------------------------
+    print("\nC3-C6. CONTENT")
+    await probe.run("content_root", "le", f"{org_unit_id}/content/root/")
+    try:
+        topics = await ctx.syncer.discover_files(org_unit_id)
+        print(f"  [OK]      discover_files: {len(topics)} downloadable topic(s)")
+        probe.results.append(
+            {"label": "discover_files", "status": "OK", "count": len(topics)}
+        )
+        if topics:
+            t = topics[0]
+            await probe.run(
+                "topic_metadata", "le", f"{org_unit_id}/content/topics/{t['topic_id']}"
+            )
+            print(f"  note: LastModifiedDate present = {bool(t.get('last_modified'))}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [FAIL]    discover_files: {exc}")
+
+    # --- assignments: THE critical one ------------------------------------
+    print("\nC7-C10. ASSIGNMENTS  <-- gates the whole assignments feature")
+    folders = await probe.run(
+        "dropbox_folders", "le", f"{org_unit_id}/dropbox/folders/", paged=True
+    )
+    if isinstance(folders, list) and folders:
+        from avenue_mcp.client import models as m
+
+        fid = m.as_int(m.pick(folders[0], "Id", "FolderId"))
+        if fid:
+            await probe.run(
+                "dropbox_folder_one", "le", f"{org_unit_id}/dropbox/folders/{fid}"
+            )
+            await probe.run(
+                "mysubmissions",
+                "le",
+                f"{org_unit_id}/dropbox/folders/{fid}/submissions/mysubmissions/",
+            )
+
+    # --- grades -----------------------------------------------------------
+    print("\nC11-C12. GRADES  <-- C12 gates grade projection")
+    await probe.run("my_grade_values", "le", f"{org_unit_id}/grades/values/myGradeValues/")
+    objects = await probe.run("grade_objects", "le", f"{org_unit_id}/grades/", paged=True)
+    if isinstance(objects, list) and objects:
+        from avenue_mcp.client import models as m
+
+        has_weights = any(m.as_float(m.pick(o, "Weight")) for o in objects if isinstance(o, dict))
+        print(f"  note: weights present = {has_weights}")
+
+    # --- news / calendar --------------------------------------------------
+    print("\nC13-C14. ANNOUNCEMENTS + CALENDAR")
+    await probe.run("news", "le", f"{org_unit_id}/news/", paged=True)
+    events = await probe.run(
+        "calendar_myevents", "le", f"{org_unit_id}/calendar/events/myEvents/", paged=True
+    )
+    if isinstance(events, list):
+        from avenue_mcp.tools.assignments import _classify
+        from avenue_mcp.client import models as m
+
+        kinds: dict[str, int] = {}
+        for ev in events:
+            if isinstance(ev, dict):
+                k = _classify(ev, str(m.pick(ev, "Title", default="") or ""))
+                kinds[k] = kinds.get(k, 0) + 1
+        print(f"  note: event kinds = {kinds}")
+        print(
+            "  ** assignment due dates in calendar: "
+            f"{kinds.get('assignment', 0) > 0} (fallback viability)"
+        )
+        print(f"  ** quiz due dates in calendar: {kinds.get('quiz', 0) > 0}")
+
+    # --- quizzes ----------------------------------------------------------
+    print("\nC14b-C14c. QUIZZES")
+    quizzes = await probe.run("quizzes", "le", f"{org_unit_id}/quizzes/", paged=True)
+    if isinstance(quizzes, list) and quizzes:
+        from avenue_mcp.client import models as m
+
+        qid = m.as_int(m.pick(quizzes[0], "QuizId", "Id"))
+        if qid:
+            await probe.run(
+                "quiz_attempts", "le", f"{org_unit_id}/quizzes/{qid}/attempts/", paged=True
+            )
+
+    # --- discussions ------------------------------------------------------
+    print("\nC14d-C14f. DISCUSSIONS")
+    forums = await probe.run(
+        "discussion_forums", "le", f"{org_unit_id}/discussions/forums/", paged=True
+    )
+    if isinstance(forums, list) and forums:
+        from avenue_mcp.client import models as m
+
+        forum_id = m.as_int(m.pick(forums[0], "ForumId", "Id"))
+        if forum_id:
+            topics_r = await probe.run(
+                "discussion_topics",
+                "le",
+                f"{org_unit_id}/discussions/forums/{forum_id}/topics/",
+                paged=True,
+            )
+            if isinstance(topics_r, list) and topics_r:
+                tid = m.as_int(m.pick(topics_r[0], "TopicId", "Id"))
+                if tid:
+                    posts = await probe.run(
+                        "discussion_posts",
+                        "le",
+                        f"{org_unit_id}/discussions/forums/{forum_id}/topics/{tid}/posts/",
+                        paged=True,
+                    )
+                    if isinstance(posts, list) and posts:
+                        first = posts[0]
+                        has_parent = "ParentPostId" in first or "ParentId" in first
+                        role = m.pick(first, "AuthorRole", "Role", "RoleName")
+                        print(f"  ** ParentPostId present: {has_parent} (question+reply chunking)")
+                        print(f"  ** author role derivable: {role is not None}")
+                        if role is None:
+                            print(
+                                "     WARNING: only names may be available. The index "
+                                "stores roles and NOT names -- see docs/07."
+                            )
+
+    # --- classlist --------------------------------------------------------
+    print("\nC15-C16. CLASS LIST  (403 expected and correct)")
+    await probe.run("classlist", "lp", f"{org_unit_id}/classlist/", paged=True)
+    await probe.run(
+        "orgunit_users", "lp", f"enrollments/orgUnits/{org_unit_id}/users/", paged=True
+    )
+
+    # --- summary ----------------------------------------------------------
+    print("\n" + "=" * 72)
+    print("SUMMARY\n")
+    ok = [r for r in probe.results if r["status"] == "OK"]
+    blocked = [r for r in probe.results if "BLOCKED" in str(r["status"])]
+    other = [r for r in probe.results if r not in ok and r not in blocked]
+
+    print(f"  Working: {len(ok)}")
+    for r in ok:
+        print(f"    OK       {r['label']}")
+    print(f"\n  Blocked: {len(blocked)}")
+    for r in blocked:
+        print(f"    BLOCKED  {r['label']}")
+    if other:
+        print(f"\n  Other: {len(other)}")
+        for r in other:
+            print(f"    {r['status']}  {r['label']}")
+
+    print("\nFEATURE VIABILITY")
+    status = {r["label"]: r["status"] for r in probe.results}
+    checks = [
+        ("Assignments (full)", "dropbox_folders"),
+        ("Grade projection", "grade_objects"),
+        ("Quiz status", "quizzes"),
+        ("Discussions corpus", "discussion_posts"),
+        ("Class roster", "classlist"),
+    ]
+    for feature, label in checks:
+        state = status.get(label, "not probed")
+        mark = "yes" if state == "OK" else "NO -- use the documented fallback"
+        print(f"  {feature:24s} {mark}  ({state})")
+
+    print("\nNext: transcribe these findings into docs/08-api-probe-results.md,")
+    print("then update the status column in docs/02-api-surface.md FROM them.")
+
+    if args.out:
+        args.out.write_text(
+            json.dumps({"versions": versions, "results": probe.results}, indent=2),
+            encoding="utf-8",
+        )
+        print(f"\nRedacted summary written to {args.out}")
+
+    await ctx.aclose()
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

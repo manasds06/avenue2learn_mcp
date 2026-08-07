@@ -2,6 +2,21 @@
 
 This is the load-bearing document. If auth doesn't work, nothing else does.
 
+> ## Verified against the live instance (2026-08-05)
+>
+> Three assumptions in the original draft were wrong. All are corrected below and
+> pinned by tests in `tests/test_live_findings.py`; full detail in
+> [`08-api-probe-results.md`](08-api-probe-results.md).
+>
+> | Assumption | Reality |
+> |---|---|
+> | Brightspace is at `avenue.mcmaster.ca` | **No.** That is a static Apache landing page; `/d2l/*` 404s. Brightspace is **`avenue.cllmcmaster.ca`** (lp 1.62, le 1.96). |
+> | `/d2l/lp/auth/xsrf-tokens` can serve as the liveness probe | **No.** It returns 200 + JSON with **no session at all**. Liveness is now `/d2l/api/lp/1.0/users/whoami`, requiring 200 **and** a JSON object. |
+> | A `403` means "authenticated but not permitted" | **Only when the body is JSON.** Anonymous API calls return **403 + HTML** — the sign-in wall. That now maps to `SessionExpiredError`. |
+>
+> The SSO chain is also confirmed: **SAML 2.0** to Microsoft Entra, tenant
+> `44376307-b429-42ad-8c25-28cd496f4772`, spanning three hosts.
+
 ## Why the official path is closed
 
 D2L's supported way to call Valence is **OAuth 2.0**. There are two grant types:
@@ -17,29 +32,44 @@ There is also a legacy path (the Keytool service, issuing App ID/Key pairs), and
 
 **Conclusion:** OAuth is unavailable to us today. It remains the right long-term answer, and asking UTS about Valence API access is a reasonable thing to do — see [`07-risks-and-policy.md`](07-risks-and-policy.md). The architecture leaves a slot for it.
 
-## The path that works: riding the browser session
+### The LTI path is closed for the same reason
 
-Brightspace's own web frontend is a JavaScript application, and when you click around Avenue it *does* call the same `/d2l/api/lp/…` and `/d2l/api/le/…` REST endpoints that Valence documents. So the endpoints are reachable from a logged-in browser context. The open question is **how those calls are authenticated**, and there are two answers.
+D2L's other sanctioned integration route is **LTI 1.3** — the standard by which external tools get launched from inside a course. It has the identical blocker: the institution must register the tool in Brightspace, exchanging a client ID, a deployment ID, and a JWKS endpoint. Same admin gate, different acronym.
 
-### Two mechanisms, not one
+### "Sign in with MacID" does not produce an Avenue session
 
-**Cookie session auth.** Send the session cookies with the request and nothing else. D2L's own guidance for calling the API from a user agent describes exactly this — "relying on the browser session as the authentication mechanism" — with an XSRF token required on non-GET requests. If this works, it is the simplest possible client.
+This deserves its own heading because it is an appealing idea that does not work, and the failure isn't obvious until you've built it.
 
-**Bearer token auth.** The frontend commonly attaches an `Authorization: Bearer <JWT>` header to its `/d2l/api/` calls. The token is short-lived (~1 hour) and is minted from the browser session at:
+McMaster's MacID sign-in is Microsoft Entra ID. So a natural thought is: register an app with Entra, run an OAuth flow, get a token, use it against Avenue.
+
+**Entra tokens are scoped to the application that requested them.** A token minted for your app carries your app's audience claim. Brightspace will not accept it — it has no trust relationship with your app registration, and no endpoint that exchanges a third-party IdP token for a Brightspace session. Session cookies are minted by *Brightspace*, after Brightspace itself completes a SAML/OIDC handshake with McMaster's IdP as the relying party. You cannot insert yourself into that handshake from outside it.
+
+Concretely:
 
 ```
-POST /d2l/lp/auth/oauth2/token
+✗  user → your app → Entra OAuth → access token → ??? → Avenue
+      no exchange exists at the "???" step
+
+✓  user → browser → avenue.mcmaster.ca
+        → redirect to Microsoft (MacID + MFA)
+        → redirect back to Avenue
+        → Avenue sets d2lSessionVal / d2lSecureSessionVal
+        → we keep those cookies
 ```
 
-with the session cookies and an `X-Csrf-Token` header. Note that this is *not* the admin-registered OAuth of the previous section — no client ID, no secret, no Manage Extensibility. It is the session exchanging itself for a short-lived token, which is a facility the logged-in browser already has.
+The distinction is **the redirect target**. In the working flow the handshake completes *with Avenue*, and we observe the result. In the broken flow it completes with us, and we hold a credential Avenue has never heard of.
 
-**Which one Avenue accepts is a Phase 0 measurement, not an assumption.** They are not mutually exclusive; the instance may accept both.
+From the user's point of view the two are indistinguishable — they click a button, sign in with their MacID Microsoft account, approve MFA, and land back working. That UX is exactly what the login flow below delivers. What we cannot do is skip the browser and own the token exchange ourselves.
 
-### Why this is stated as an open question
+## The path that works: session authentication
 
-An earlier draft of this document asserted cookie auth as settled, citing three prior-art MCP servers as proof. That citation does not survive inspection — see [Prior art](#prior-art-and-what-it-actually-shows) below. The mechanism the one inspectable project actually ships is bearer capture, not cookies. Getting this wrong is expensive: it determines whether the browser is a one-time login step or an hourly runtime dependency.
+Brightspace's own web frontend is a JavaScript application. When you click around Avenue, the page is calling the *same* `/d2l/api/lp/…` and `/d2l/api/le/…` REST endpoints that Valence documents. It authenticates those calls not with OAuth, but with **the browser session** — the cookies you already have from logging in.
 
-### The pieces, in detail
+That mechanism is available to us. Log in once through a real browser, keep the cookies, and call the API directly.
+
+### The mechanism in detail
+
+Three pieces:
 
 **1. Session cookies.** After a successful login, Brightspace sets:
 
@@ -64,7 +94,7 @@ X-Csrf-Token: <token>
 
 The same value is also present in browser `localStorage` under the key `XSRF.Token`, which is a useful cross-check when debugging. It expires with the session.
 
-**The XSRF token is v1-critical, not v2 groundwork.** It is required on **non-GET** requests, and it is tempting to conclude that a read-only v1 doesn't need it. That conclusion is wrong: minting a bearer token is itself a `POST /d2l/lp/auth/oauth2/token`, so under bearer auth the token is on the critical path from the first call. Even under cookie-only auth it earns its place as a cheap, reliable session-liveness probe.
+**Important scoping:** the XSRF token is required for **non-GET** requests only. Since v1 of this server is entirely read-only (all GETs), the token is not strictly needed yet. We fetch and manage it anyway, for two reasons: it is a cheap and reliable liveness probe for the session, and the v2 write path (`POST` a submission) will need it. Building it in now avoids a retrofit later.
 
 **3. API version negotiation.** Valence routes embed a version number in the path — `/d2l/api/le/1.89/...`. Versions advance with each Brightspace release, and different instances run different versions. Do not hardcode. Call:
 
@@ -82,15 +112,15 @@ This is worth being precise about because it is the crux of the ethical position
 
 ### Prior art, and what it actually shows
 
-Several independent D2L MCP servers exist and work against student accounts, which establishes that *some* browser-derived mechanism is viable. It does **not** establish that cookie auth specifically is.
+Several independent D2L MCP servers work against student accounts, which establishes that *some* browser-derived mechanism is viable. It does **not** establish that cookie auth specifically is.
 
 | Project | What it does |
 |---|---|
-| `joshuasoup/d2l-mcp` | Node/TS, Playwright SSO. **Captures the frontend's bearer token, does not use cookies.** |
+| `joshuasoup/d2l-mcp` | Node/TS, Playwright SSO. **Captures the frontend's bearer token; uses no cookie auth.** |
 | `RohanMuppa/brightspace-mcp-server` | Node/TS. Browser automation with MFA, AES-256-GCM session storage. Mechanism not inspectable from the published README. |
 | `general-mudkip/d2l-mcp-server` | Assignments, grades, calendar, announcements, content. |
 
-The middle column matters. `joshuasoup/d2l-mcp` is the one whose source is readable, and its `src/auth.ts` intercepts Brightspace's own outbound requests to lift the token:
+The middle column matters, and an earlier draft of this document got it wrong — it claimed all three "ship on this mechanism", meaning cookies. `joshuasoup/d2l-mcp` is the one whose source is readable, and its `src/auth.ts` intercepts Brightspace's own outbound requests to lift a token:
 
 ```js
 if (url.includes("/d2l/api/")) {
@@ -98,11 +128,32 @@ if (url.includes("/d2l/api/")) {
   if (auth?.startsWith("Bearer ")) { capturedToken = auth.slice(7);
 ```
 
-`src/client.ts` then sends `Authorization: Bearer ${token}` on every call. There is no cookie auth in it. Its README confirms the consequence: *"Auth tokens expire after ~1 hour but auto-refresh using the saved browser session."*
+`src/client.ts` then sends `Authorization: Bearer ${token}` on every call. Its README confirms the consequence: *"Auth tokens expire after ~1 hour but auto-refresh using the saved browser session."*
 
-So the honest reading of the prior art is: **bearer tokens are confirmed to work; cookie auth is unconfirmed.** Phase 0 tests cookies first because it would be the better design if it works — but the fallback is the mechanism that's already known to.
+So the honest position is: **bearer tokens are confirmed to work somewhere; cookie auth is unconfirmed here.** Cookie auth remains plausible — D2L's own guidance describes "relying on the browser session as the authentication mechanism", with `X-Csrf-Token` on non-GETs — and it is what this server implements, because it would be the better design. But it is a bet, not a settled fact, and the first login will settle it.
 
-D2L publishes `Brightspace/superagent-d2l-session-auth`, a first-party plugin whose job is attaching D2L session auth headers to requests. That's evidence session-based API auth is a real mechanism D2L builds on itself; it is not evidence about Avenue's specific configuration.
+D2L publishes `Brightspace/superagent-d2l-session-auth`, a first-party plugin whose job is attaching D2L session auth headers to requests. That's evidence session-based API auth is a real mechanism D2L builds on itself; it is not evidence about Avenue's configuration.
+
+### If cookie auth turns out not to work
+
+Two fallbacks exist, in preference order. Both implement `AuthProvider` (`apply` / `headers_for` / `is_alive`), so neither touches the tool layer:
+
+1. **Mint a bearer from the session.** `POST /d2l/lp/auth/oauth2/token` with the session cookies and an `X-Csrf-Token`. This is not the admin-registered OAuth above — no client ID, no secret; it is the session exchanging itself for a short-lived token, which the logged-in browser can already do. **This preserves the property that matters:** the browser stays a login-only step.
+2. **Capture the bearer during login.** Add a request listener to the Playwright context that lifts `Authorization: Bearer …` off any `/d2l/api/` call, and persist it beside the cookies. Guaranteed to work — it's what the prior art ships — but the token dies in about an hour and only a browser can refresh it.
+
+Neither is implemented, deliberately: unwired auth code that no caller invokes and no test covers rots. Write whichever the probe shows is needed.
+
+**The choice decides the product's ergonomics**, so record it in [`08-api-probe-results.md`](08-api-probe-results.md):
+
+| Active strategy | Login cadence |
+|---|---|
+| Cookies | Roughly daily |
+| Minted bearer | Roughly daily — the ~1h token re-mints without a browser |
+| Captured bearer | **Roughly hourly** — only a browser can refresh it |
+
+**Use one of these as a Phase 0 shortcut.** Before writing our own probe, install `RohanMuppa/brightspace-mcp-server` (it advertises MFA support and "works with any school") and point it at `avenue.mcmaster.ca`. If it lists your courses, the entire auth premise above is validated in twenty minutes rather than half a day. If it fails, *how* it fails tells us what McMaster's Entra chain does to browser automation — which is precisely what our login flow has to handle.
+
+Two things it will not do for us: it's read-only, and it has no semantic search over course files. It's a de-risking instrument, not a substitute. See [`06-roadmap.md`](06-roadmap.md) Phase 0.
 
 ## Login flow
 
@@ -115,9 +166,8 @@ McMaster SSO involves a MacID, a password, and multi-factor authentication. MFA 
   │  2. Navigate to avenue.mcmaster.ca               │
   │  3. USER logs in: MacID + password + MFA         │
   │  4. Wait for the post-login landing page         │
-  │  5. Capture any Bearer token the frontend uses   │
-  │  6. Persist context.storage_state() to disk      │
-  │  7. Close the browser                            │
+  │  5. Persist context.storage_state() to disk      │
+  │  6. Close the browser                            │
   │                                                  │
   └──────────────────────────────────────────────────┘
                        │
@@ -126,39 +176,25 @@ McMaster SSO involves a MacID, a password, and multi-factor authentication. MFA 
   │  1. Load storage_state from disk                  │
   │  2. Build an httpx client with that cookie jar    │
   │  3. GET /d2l/lp/auth/xsrf-tokens  → liveness      │
-  │  4. Authorize the request per the active strategy │
-  │  5. If OK: call the API directly. No browser.     │
+  │  4. If OK: call the API directly. No browser.     │
   │     If not: session is dead → re-auth             │
   │                                                   │
   └───────────────────────────────────────────────────┘
 ```
 
-Step 5 of the login flow is cheap insurance: capturing the bearer costs one request listener and guarantees a working credential even if cookie auth turns out not to be accepted.
-
-### The three strategies
-
-All three implement `AuthProvider` (below). The server resolves one at first use and sticks with it.
-
-| Strategy | How it authorizes | Browser needed at runtime? |
-|---|---|---|
-| `CookieSessionAuth` | Cookie jar only | No |
-| `BearerTokenAuth` | Mints a bearer from cookies via `POST /d2l/lp/auth/oauth2/token`, re-mints on expiry | No |
-| `CapturedBearerAuth` | Replays the bearer lifted during login | **Yes, ~hourly** |
-
-**Resolution order is cookies → minted bearer → captured bearer**, cheapest and most durable first. The first two both preserve the property that matters: *the browser is a login mechanism, not a runtime dependency.* Only the third breaks it, and it exists solely as the guaranteed-to-work floor, since it's what the prior art ships.
-
-If Phase 0 finds cookie auth works, the other two become dead code paths worth keeping for other institutions' instances. If it finds cookie auth fails, the fallback already exists and no rewrite is needed. That's the whole reason for building the abstraction before knowing the answer.
+The browser is used **only** to acquire a session. Once we have cookies, all real work goes through `httpx` — far faster, lower memory, and no browser process hanging around. Playwright is a login mechanism, not a scraping mechanism.
 
 ### `SessionManager` responsibilities
 
 | Responsibility | Behavior |
 |---|---|
-| `login()` | Launch headed Playwright, wait for user auth, capture bearer, persist `storage_state` |
-| `load()` | Read persisted state; return a configured `httpx.AsyncClient` |
+| `login()` | Launch headed Playwright, wait for user auth, persist `storage_state` |
+| `load()` | Read persisted state; return a configured `httpx.Client` |
 | `is_alive()` | Probe `/d2l/lp/auth/xsrf-tokens`; also refreshes the cached token |
 | `xsrf_token()` | Return current token, fetching if absent |
-| `provider()` | Resolve and cache the working `AuthProvider` per the order above |
 | `require_session()` | `load()` → `is_alive()` → raise a typed `SessionExpiredError` if dead |
+| `status()` | Session present? age? last successful call? — backs the `get_status` tool ([`03`](03-mcp-tools.md)) |
+| `start_keepalive()` / `stop_keepalive()` | Scoped session extension; see Keepalive below |
 
 `require_session()` **never silently launches a browser.** An MCP server runs headless under a client; popping a browser window mid-tool-call is hostile and can hang the call. Instead the tool fails with a clear, actionable message and the user re-runs the login command deliberately. See the error contract below.
 
@@ -174,15 +210,25 @@ Observed behavior in comparable D2L deployments:
 
 McMaster's exact values are unknown and are a **Phase 0 measurement** — record them in [`08-api-probe-results.md`](08-api-probe-results.md).
 
-**How often you re-login depends entirely on which strategy wins**, so don't promise a number until the probe returns one:
+Practical consequence: expect to re-login roughly once a day. Design for that being a smooth, one-command operation rather than a crisis.
 
-| Active strategy | Expected login cadence |
+### Keepalive — extending a session in active use
+
+Daily re-login is the friction most likely to make this tool unpleasant enough to abandon. Brightspace sessions, like most session-based apps, extend their idle timer on activity. So a cheap periodic request can keep a session alive well past its idle window.
+
+This sits in tension with the no-background-requests commitment in [`07-risks-and-policy.md`](07-risks-and-policy.md), and the resolution has to be deliberate rather than accidental:
+
+| Rule | Value |
 |---|---|
-| `CookieSessionAuth` | Once the browser session dies — roughly daily |
-| `BearerTokenAuth` | Also roughly daily; the ~1h token re-mints from cookies without a browser |
-| `CapturedBearerAuth` | **Roughly hourly** — the token can only be refreshed by re-running the browser flow |
+| Keepalive runs | **Only while the server process is up and has served at least one tool call** |
+| Never runs | Before first use; after an idle period; when no session exists |
+| Request used | `GET /d2l/lp/auth/xsrf-tokens` — the same liveness probe, no extra surface |
+| Interval | ~30 min (config: `AVENUE_MCP_KEEPALIVE_MINUTES`, `0` disables) |
+| Idle shutoff | Stops after `AVENUE_MCP_KEEPALIVE_IDLE_STOP` minutes with no tool calls (default 120) |
 
-The gap between "daily" and "hourly" is the difference between a tool that's pleasant and one that's irritating, which is why resolving the strategy is Phase 0's first job rather than a detail.
+The distinction that keeps this honest: **this is not polling for data.** It sends no queries, fetches no course content, and stops on its own when you walk away. It's one lightweight request every half hour during a working session — materially less traffic than leaving an Avenue tab open in a browser, which does the same thing automatically.
+
+It is also **off by default in v1** (`AVENUE_MCP_KEEPALIVE_MINUTES=0`) until Phase 0 confirms that (a) sessions do in fact extend on activity, and (b) the idle window is short enough for this to be worth doing. Both are measurements, not assumptions — record them in [`08-api-probe-results.md`](08-api-probe-results.md).
 
 ### Detecting expiry
 
@@ -218,22 +264,11 @@ What *is* persisted is the session state:
 | Item | Detail |
 |---|---|
 | Path | `~/.avenue-mcp/session.json` (override via `AVENUE_MCP_STATE_DIR`) |
-| Contents | Playwright `storage_state` — cookies + localStorage — plus any captured bearer token |
-| Permissions | Owner-only, set explicitly on write. **Mechanism differs by platform — see below.** |
+| Contents | Playwright `storage_state` — cookies + localStorage |
+| Permissions | `0600`, owner-only, set explicitly on write |
 | Git | The whole `~/.avenue-mcp/` directory lives outside the repo. `.gitignore` additionally covers `*.session.json`, `storage_state.json`, and `.avenue-mcp/` as a belt-and-braces guard against a stray local copy. |
 
 **Treat this file as equivalent to your logged-in Avenue session, because that's exactly what it is.** Anyone with it can act as you on Avenue until it expires. Do not commit it, do not sync it, do not paste it in a bug report.
-
-### Restricting the file, per platform
-
-`os.chmod(path, 0o600)` is the obvious implementation and it is **a silent no-op on Windows** — NTFS uses ACLs, and CPython's `chmod` there only toggles the read-only attribute. Writing `chmod(0o600)` and calling the file protected would leave this project's single most sensitive artifact inheriting whatever the parent directory grants, while the code and the docs both claim otherwise.
-
-| Platform | Mechanism |
-|---|---|
-| Linux / macOS | `os.chmod(path, 0o600)` |
-| Windows | `icacls <path> /inheritance:r /grant:r "<current user>:F"` — break inheritance, then grant the current user only |
-
-Verify rather than assume: `ls -l` on POSIX, `icacls session.json` on Windows. The check belongs in the Phase 1 exit criteria for exactly this reason — a protection that silently doesn't apply is worse than a known-absent one, because it stops anyone looking.
 
 Encryption at rest (as `brightspace-mcp-server` does with AES-256-GCM) is a reasonable Phase 4 hardening item, but it is worth being honest that it buys less than it appears: the key has to live on the same machine, so it protects against casual file-browsing and backup leakage rather than a compromised account. File permissions plus not-in-git covers most of the realistic risk.
 
@@ -246,8 +281,7 @@ Encryption at rest (as `brightspace-mcp-server` does with AES-256-GCM) is a reas
 | Session dies mid-tool-call | Expiry, or admin invalidation | Typed `SessionExpiredError`, no retry storm |
 | HTML returned instead of JSON | Expiry redirect | Caught by the content-type check above |
 | Wrong API version in path | Hardcoded version | Prevented by `/d2l/api/versions/` negotiation |
-| Cookies work in browser, 401/403 via httpx | The instance requires a bearer, not cookies | Fall through to `BearerTokenAuth`, then `CapturedBearerAuth`. This is the failure the strategy ladder exists for. |
-| MFA challenges every single login | Playwright's bundled Chromium reads as an unfamiliar device to Entra ID | Launch with `channel="msedge"` and a persistent user-data-dir so the "remember this device" state survives |
+| Cookies work in browser, 403 via httpx | Missing cookie, or missing headers the frontend sends | Carry the full jar; set a realistic `User-Agent`; add `X-Csrf-Token` on non-GETs |
 
 ## The OAuth slot
 
@@ -259,10 +293,8 @@ class AuthProvider(Protocol):
     def is_alive(self) -> bool: ...
 ```
 
-- `CookieSessionAuth`, `BearerTokenAuth`, `CapturedBearerAuth` — the three strategies described in this document.
+- `CookieSessionAuth` — the implementation described in this document.
 - `OAuthAuth` — **documented, not implemented.** If McMaster ever issues a client ID and secret, this class is written, the config selects it, and *nothing in the tool layer changes*.
-
-The interface was originally justified by the hypothetical of McMaster granting OAuth someday. It has already earned its keep for a much nearer-term reason: the cookie-vs-bearer question is unresolved, and the abstraction is what lets that be resolved by measurement instead of by guessing right in advance.
 
 That separation is the reason this doc's conclusion is "OAuth is closed *today*" rather than "OAuth is irrelevant."
 
@@ -270,16 +302,12 @@ That separation is the reason this doc's conclusion is "OAuth is closed *today*"
 
 Record answers in [`08-api-probe-results.md`](08-api-probe-results.md).
 
-**Question 0 outranks the rest and gates the design:**
-
-0. **Does a cookie-only GET to `users/whoami` succeed?** If yes, `CookieSessionAuth` wins and the client is as simple as it gets. If no, does `POST /d2l/lp/auth/oauth2/token` mint a usable bearer from the same cookies? If that also fails, we are on `CapturedBearerAuth` and the browser is an hourly runtime dependency — which changes what the README can promise about daily use.
-
-Then:
-
 1. Which exact cookies does `avenue.mcmaster.ca` set, and is the full jar necessary or is the documented pair sufficient?
 2. What API versions does `/d2l/api/versions/` report for `lp` and `le`?
-3. How long does a session actually survive, idle and active? How long does a minted bearer last?
+3. How long does a session actually survive, idle and active?
 4. Does an expired session return `401`, a `302`, or an HTML `200`?
 5. Does McMaster's SSO land on Avenue directly, or bounce through an intermediate portal that the login-success wait must account for?
 6. Is a browser-like `User-Agent` required, or do requests succeed with the default `httpx` one?
-7. Does Entra ID accept Playwright's bundled Chromium, or is `channel="msedge"` needed to avoid an MFA challenge on every run?
+7. **Does activity extend the session's idle timer?** Gates whether keepalive is worth enabling at all.
+8. **Is there an absolute session cap that activity cannot extend?** If so, keepalive buys hours, not days, and the docs should say which.
+9. Does `RohanMuppa/brightspace-mcp-server` successfully authenticate against Avenue? (The twenty-minute validation above.)

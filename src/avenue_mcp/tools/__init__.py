@@ -1,5 +1,29 @@
-"""The MCP tool surface.
+from avenue_mcp.tools import (
+    announcements,
+    assignments,
+    classlist,
+    content,
+    courses,
+    discussions,
+    grades,
+    quizzes,
+    search,
+    status,
+    whatsnew,
+    writes,
+)
 
-Rule from docs/05: tools never talk to HTTP directly. They call client/, which
-keeps them testable against a fake client with no network.
-"""
+__all__ = [
+    "announcements",
+    "assignments",
+    "classlist",
+    "content",
+    "courses",
+    "discussions",
+    "grades",
+    "quizzes",
+    "search",
+    "status",
+    "whatsnew",
+    "writes",
+]

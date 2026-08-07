@@ -53,6 +53,16 @@ Better context makes AI assistance *more* useful for legitimate purposes and doe
 
 **If you enable write mode and submit work you didn't do, that is a policy violation and the tooling is not a defense.** Stated here so it can't be claimed nobody said so.
 
+### Quizzes: metadata only, deliberately
+
+One capability is scoped narrowly on integrity grounds rather than technical ones.
+
+`list_quizzes` returns **names, dates, availability windows, and whether you've attempted** — and nothing else. Quiz *questions* and *answers* are explicitly out of scope, and would remain out of scope even if a route exposed them to students.
+
+The line is clean: knowing *a quiz is due Friday* is calendar information. Retrieving *the quiz's contents* while it's open is the thing academic integrity policies exist to prohibit. Since quizzes are also excluded from the RAG corpus, there is no path by which quiz content reaches the index.
+
+Same reasoning applies to discussion posting: reading a forum thread to find your instructor's clarification is studying; having an AI post in your name to a space your classmates read is not something this server does. See [`02-api-surface.md`](02-api-surface.md) *Routes deliberately not used*.
+
 ---
 
 ## 2. Terms of service and institutional policy
@@ -96,7 +106,9 @@ Do not distribute this as a service, do not run it for other students, do not ho
 |---|---|---|
 | Session cookies | `~/.avenue-mcp/session.json` | `0600`. **Equivalent to your logged-in session.** |
 | Course files | `~/.avenue-mcp/cache/` | Slides, outlines, readings — instructor-copyrighted |
-| Extracted text + vectors | `~/.avenue-mcp/index.db`, `vectors.npy` | |
+| Extracted text + vectors | `~/.avenue-mcp/index.db`, `vectors.npy` | Includes **discussion post text**, role-attributed only — see below |
+| Rendered page images | `~/.avenue-mcp/cache/renders/` | Derived from cached files |
+| Watermarks | `~/.avenue-mcp/index.db` | Timestamps only, no content |
 | Grades | Not persisted | Fetched live, never cached ([`05`](05-architecture.md)) |
 | Logs | `~/.avenue-mcp/logs/` | Credential-redacted |
 
@@ -120,6 +132,37 @@ Consequences:
 
 If `get_class_list` turns out to work (unlikely — see [`02`](02-api-surface.md)), it returns **other students' names and email addresses**, which is personal information under Ontario's FIPPA. Do not export it, do not build a mailing list, do not persist it. The tool is designed to return instructor contacts, and the probable `403` on the roster is the correct outcome, not a bug to work around.
 
+### Discussion posts: other students' words, indexed
+
+Indexing discussion threads ([`04-rag-design.md`](04-rag-design.md)) means classmates' posts land in a local searchable database. That's a real privacy consideration and it gets a real answer rather than a shrug.
+
+**Author names are not stored.** Anywhere. Chunks carry `author_role` — `Instructor` / `TA` / `Student` — and nothing else. The role is what determines authority, which is the only reason the field exists; the name adds no retrieval value and would turn the index into a durable name-to-opinion record of a course's private forum.
+
+Two consequences worth accepting deliberately:
+
+- You cannot ask "what did *[classmate]* say about A3?" That's not a missing feature; it's the point.
+- Search results attribute to a role and a date — *"your instructor said this on March 9"* — which is what a student actually needs from a citation anyway.
+
+Everything else in this section still applies: don't export the index, don't share it, don't commit it. A course forum is a semi-private space, and the fact that you can read it as an enrolled student doesn't make its contents yours to redistribute.
+
+### Prompt injection: course content is not fully trusted input
+
+Worth stating because the shape of this system makes it relevant, even though the practical risk here is low.
+
+Course files and discussion posts are **text written by other people** that flows into a model **holding tools**. A PDF or a forum post could contain text crafted to read as instructions — *"ignore previous instructions and…"*. In a read-only v1 the realistic worst case is a wrong or weird answer. It gets more consequential if write mode is ever enabled, since a tool that can submit is a tool an injected instruction might try to invoke.
+
+Mitigations, mostly structural:
+
+| Mitigation | Effect |
+|---|---|
+| Retrieved passages are returned as **data with citations**, not as instructions | The model sees "here is a passage from a file", not a bare imperative |
+| v1 has **no write tools registered** | Nothing to hijack |
+| Write mode requires an explicit `confirm: true` **from the user's turn** | An injected instruction cannot supply user confirmation |
+| Dry-run preview shows what would be submitted | A human sees the target before anything happens |
+| Audit log | If something odd happens, there's a record |
+
+Realistic threat level: **low.** Nobody is planting injection payloads in a COMPSCI outline. But the mitigation that matters is already in place for other reasons — writes are gated behind a human confirmation that model-visible text cannot forge — and that's the property to preserve if the write path is ever built. Recording it here so it's a known consideration rather than a surprise.
+
 ### Session file handling
 
 Bears repeating because it's the most likely real leak:
@@ -142,13 +185,34 @@ An unsanctioned integration that generates abnormal load is the one that gets no
 | Retries | Max 3, jittered exponential backoff | No retry storms |
 | `Retry-After` | Honored | Do what we're told |
 | Caching | Aggressive on stable data | Fewer requests for identical data |
-| **Background polling** | **None** | Every request traces to a user action |
-| Scheduled jobs | None | No cron, no timers, no daemon |
+| **Polling for data** | **None, ever** | Every data request traces to a user action |
+| Scheduled jobs | None | No cron, no daemon, no background sync |
 | Sync | Explicit, user-initiated only | Never automatic, never on a search miss |
+| Session keepalive | One liveness ping / 30 min, **only during an active session** | See the carve-out below. Default **off**. |
 
-**The no-background-work property is the one worth being able to state plainly.** This server makes zero requests when you aren't using it. It is not a bot; it's a slightly automated browser session that only moves when you ask it to. That's a meaningfully different traffic profile from a scraper, and it's deliberate.
+**The no-background-work property is worth being able to state plainly.** This server does not poll Avenue for data. It is not a bot; it's a slightly automated browser session that moves when you ask it to. That's a meaningfully different traffic profile from a scraper, and it's deliberate.
 
 The heaviest operation is the first sync of a course (~40 file downloads over a few minutes, throttled). Even that is well within what normal browsing generates — a student clicking through every file in a course does the same thing, less politely.
+
+### The one carve-out: session keepalive
+
+Honesty requires flagging that there *is* one timer, rather than letting a reader discover it and conclude the paragraph above was marketing.
+
+Sessions expire in roughly a day, and re-logging-in daily is the friction most likely to make this tool annoying enough to abandon. Brightspace extends a session's idle timer on activity, so one cheap request every half hour keeps it alive.
+
+Bounded on every side:
+
+| Property | Value |
+|---|---|
+| What it sends | `GET /d2l/lp/auth/xsrf-tokens` — a liveness probe, nothing else |
+| What it fetches | **Nothing.** No queries, no course data, no content. |
+| When it starts | Only after the first real tool call of a process |
+| When it stops | After ~2 h idle, or on shutdown |
+| Default | **Off** (`AVENUE_MCP_KEEPALIVE_MINUTES=0`) pending Phase 0 |
+
+The distinction that keeps this consistent rather than a loophole: **no polling for data, ever; one session-extension request during a working session, which stops on its own when you walk away.** That is less traffic than an idle Avenue browser tab, which does exactly the same thing without asking anyone.
+
+It ships default-off, and [`06-roadmap.md`](06-roadmap.md) makes "zero background requests when disabled" a verified exit criterion rather than a claim. A documented property nobody checked is just a hope.
 
 ---
 
@@ -201,7 +265,21 @@ The two-step flow is not friction for its own sake. It ensures a human sees *wha
 **Don't:**
 - Enable write mode without understanding submissions are irreversible
 - Submit work you didn't do — the tooling is not a defense
-- Share your session file, your cache, or your index
+- Share your session file, your cache, or your index — the index now contains classmates' forum posts
 - Run it for anyone else, or host it as a service
 - Redistribute instructor course materials
 - Treat continued access as guaranteed
+
+**Won't, by design — capabilities deliberately absent:**
+
+| Not built | Why |
+|---|---|
+| Quiz questions or answers | Integrity line. Metadata only. |
+| Posting to discussions | Speaking in your name to classmates |
+| Instructor-side feedback or grading | Not reachable, and not a student's business |
+| Full student rosters | Restricted personal information; expected `403` is the right answer |
+| Author names on indexed posts | Roles carry the signal; names would make the index a record of classmates' opinions |
+| Background data polling | One bounded session keepalive, default off, and nothing else |
+| Hosted multi-user access | Would make you custodian of other students' live Avenue sessions |
+
+These are decisions, not gaps. A future contributor reading this list should treat each row as a boundary that was reasoned about, and re-open it only deliberately.

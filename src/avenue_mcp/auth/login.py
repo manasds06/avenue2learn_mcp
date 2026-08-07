@@ -1,180 +1,179 @@
-"""Interactive Playwright login (docs/01-authentication.md).
+"""Interactive login via a real browser.
 
-The browser acquires a session and nothing else. It is never used for
-scraping, and never launched from a tool call.
+McMaster SSO is MacID + password + 2FA. Fully headless credential-stuffing is
+not a design goal: it is fragile and it means storing a password. So we open a
+real browser, let the user sign in, and keep the resulting session.
 
-Two things this flow does that are easy to get wrong:
+The browser is used ONLY to acquire a session. All real work afterwards goes
+through httpx -- Playwright is a login mechanism, not a scraping mechanism.
 
-1. **It waits on a post-login success signal, not on form selectors.** McMaster
-   SSO redesigns would break selector-based waits; landing on an authenticated
-   Avenue URL is stable across them.
-2. **It captures any bearer token the frontend uses.** One request listener,
-   and it guarantees a working credential even if cookie auth turns out not to
-   be accepted by this instance.
+Critically, this waits for a *post-login success signal* (an authenticated
+Avenue URL) rather than for specific form selectors. Selector-based waits break
+every time McMaster restyles the SSO page.
 """
 
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
+import os
+import re
 import sys
-from typing import Any
+import time
+from pathlib import Path
+from urllib.parse import urlparse
 
-from avenue_mcp.config import Settings, get_settings
+from avenue_mcp.auth.filelock import restrict_to_owner
 from avenue_mcp.errors import LoginTimeoutError
-from avenue_mcp.auth.session import SessionManager
 
 log = logging.getLogger(__name__)
 
-LOGIN_TIMEOUT_MS = 5 * 60 * 1000  # generous: MFA pushes get missed
-
-# Hosts that mean "still authenticating". McMaster bounces through Microsoft
-# Entra; the exact chain is a Phase 0 observation.
-_LOGIN_HOST_MARKERS = ("login", "sso", "adfs", "microsoftonline", "duosecurity", "okta")
-
-# Launching real Edge rather than Playwright's bundled Chromium: Entra ID
-# risk-scores unfamiliar browsers, and the bundled build can trigger an MFA
-# challenge on every single run. Falls back if the channel isn't installed.
-_PREFERRED_CHANNELS = ("msedge", "chrome")
+# Paths that only exist once Brightspace has issued a session.
+_SUCCESS_PATH = re.compile(r"/d2l/(home|le/|lp/|api/)", re.IGNORECASE)
+_SESSION_COOKIES = ("d2lSessionVal", "d2lSecureSessionVal")
 
 
-def _is_login_url(url: str) -> bool:
-    lowered = url.lower()
-    return any(marker in lowered for marker in _LOGIN_HOST_MARKERS)
-
-
-def _is_authenticated_url(url: str, base_url: str) -> bool:
-    """True once we're on Avenue proper and no longer in the SSO chain."""
-    host = base_url.split("://", 1)[-1].rstrip("/").lower()
-    lowered = url.lower()
-    return host in lowered and "/d2l/" in lowered and not _is_login_url(lowered)
-
-
-async def _launch(playwright: Any) -> tuple[Any, str]:
-    """Prefer a real installed browser; fall back to bundled Chromium."""
-    last_error: Exception | None = None
-    for channel in _PREFERRED_CHANNELS:
-        try:
-            browser = await playwright.chromium.launch(headless=False, channel=channel)
-            log.info("Launched %s for login", channel)
-            return browser, channel
-        except Exception as exc:  # channel not installed on this machine
-            last_error = exc
-            log.debug("Channel %s unavailable: %s", channel, exc)
-
-    log.info(
-        "Falling back to Playwright's bundled Chromium. If Entra prompts for MFA "
-        "on every login, installing Microsoft Edge avoids that."
-    )
+def _looks_authenticated(url: str, host: str) -> bool:
     try:
-        return await playwright.chromium.launch(headless=False), "bundled-chromium"
-    except Exception as exc:
-        raise LoginTimeoutError(
-            "Could not launch a browser for login. If Playwright's browsers "
-            "aren't installed yet, run: python -m playwright install chromium"
-        ) from exc
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.netloc and parsed.netloc.lower() != host.lower():
+        return False
+    return bool(_SUCCESS_PATH.search(parsed.path or ""))
 
 
-async def login(settings: Settings | None = None) -> dict[str, Any]:
-    """Run the interactive login and persist the session.
+def interactive_login(
+    base_url: str,
+    session_path: Path,
+    timeout_seconds: int = 300,
+    headless: bool = False,
+    login_url: str | None = None,
+) -> dict[str, object]:
+    """Open a browser, wait for the user to sign in, persist storage_state.
 
-    Returns a summary dict for the CLI to print. Raises LoginTimeoutError if
-    the user doesn't finish in time.
+    McMaster's flow spans THREE hosts, confirmed by tracing it live:
+
+        avenue.mcmaster.ca/login.php   (static landing page, 302)
+          -> login.microsoftonline.com/<tenant>/saml2   (MacID + 2FA)
+          -> back via RelayState
+          -> avenue.cllmcmaster.ca/d2l/...   (Brightspace; cookies land here)
+
+    So `login_url` is where we start and `base_url` is where success is
+    detected. Waiting on the wrong host is why a naive flow appears to hang
+    forever after a successful sign-in.
+
+    Returns the storage_state dict. Raises LoginTimeoutError if the user does
+    not finish in time.
     """
-    settings = settings or get_settings()
-    settings.ensure_dirs()
-
     try:
-        from playwright.async_api import async_playwright
-    except ImportError as exc:
-        raise LoginTimeoutError(
-            "Playwright isn't installed. Run: pip install playwright && "
-            "python -m playwright install chromium"
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "Playwright is not installed. Run: pip install playwright && playwright install chromium"
         ) from exc
 
-    captured_bearer: str | None = None
+    host = urlparse(base_url).netloc
+    entry = login_url or base_url
+    deadline = time.monotonic() + timeout_seconds
+    state: dict[str, object] | None = None
 
-    async with async_playwright() as playwright:
-        browser, channel = await _launch(playwright)
-        # A persistent-looking context keeps Entra's "remember this device"
-        # state useful across runs.
-        context = await browser.new_context(user_agent=settings.user_agent)
-        page = await context.new_page()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=headless)
+        context = browser.new_context()
+        page = context.new_page()
 
-        def _on_request(request: Any) -> None:
-            nonlocal captured_bearer
-            if captured_bearer or "/d2l/api/" not in request.url:
-                return
-            header = request.headers.get("authorization", "")
-            if header.lower().startswith("bearer "):
-                captured_bearer = header[7:]
-                log.debug("Captured a bearer token from frontend traffic")
+        print(f"\nOpening {entry}")
+        print("Sign in with your MacID (including 2FA).")
+        print(f"Waiting for a Brightspace session on {host} ...")
+        print("This window closes automatically once you're signed in.\n")
+        page.goto(entry, wait_until="domcontentloaded")
 
-        context.on("request", _on_request)
+        while time.monotonic() < deadline:
+            # Success = session cookies scoped to the Brightspace host. Checked
+            # against cookie domain rather than the current page URL, because
+            # the SAML round trip can leave the tab on an intermediate host even
+            # after Brightspace has issued the session.
+            cookies = context.cookies()
+            have_cookies = any(
+                c.get("name") in _SESSION_COOKIES
+                and host.endswith(str(c.get("domain", "")).lstrip("."))
+                for c in cookies
+            )
+            if not have_cookies:
+                # Fall back to a name-only check: some deployments scope cookies
+                # to a parent domain.
+                have_cookies = any(c.get("name") in _SESSION_COOKIES for c in cookies)
 
-        print(f"\nOpening {settings.base_url} in {channel}.")
-        print("Sign in with your MacID, password, and MFA.")
-        print("This window closes by itself once you're through.\n")
-
-        await page.goto(f"{settings.base_url}/d2l/home", wait_until="domcontentloaded")
+            if have_cookies:
+                # Confirm by actually landing on an authenticated Brightspace
+                # page, rather than trusting cookie presence alone.
+                try:
+                    page.goto(f"{base_url}/d2l/home", wait_until="domcontentloaded")
+                except Exception:  # noqa: BLE001 -- navigation races are fine
+                    pass
+                if _looks_authenticated(page.url, host):
+                    state = context.storage_state()
+                    break
+            try:
+                page.wait_for_timeout(1000)
+            except Exception:  # noqa: BLE001 -- window closed by the user
+                break
 
         try:
-            await _wait_for_login(page, settings.base_url)
-        except asyncio.TimeoutError as exc:
-            await context.close()
-            await browser.close()
-            raise LoginTimeoutError() from exc
-
-        # Let the frontend settle so its API calls (and their bearer) happen.
-        try:
-            await page.wait_for_timeout(3000)
-        except Exception:
+            context.close()
+            browser.close()
+        except Exception:  # noqa: BLE001
             pass
 
-        storage_state = await context.storage_state()
-        await context.close()
-        await browser.close()
+    if state is None:
+        raise LoginTimeoutError(
+            "Login did not complete before the window closed or timed out."
+        )
 
-    manager = SessionManager(settings)
-    manager.save_state(storage_state, captured_bearer=captured_bearer)
-
-    from avenue_mcp.auth.filelock import describe_permissions
-
-    return {
-        "session_path": str(manager.session_path),
-        "cookies_captured": len(storage_state.get("cookies", [])),
-        "bearer_captured": captured_bearer is not None,
-        "permissions": describe_permissions(manager.session_path),
-    }
+    _persist(state, session_path)
+    n = len(state.get("cookies", []) or [])
+    print(f"Signed in. Session saved to {session_path} ({n} cookies).")
+    return state
 
 
-async def _wait_for_login(page: Any, base_url: str) -> None:
-    """Poll for an authenticated Avenue URL.
+def _persist(state: dict[str, object], path: Path) -> None:
+    """Write storage_state with owner-only permissions.
 
-    Deliberately not `wait_for_url` with a fixed pattern and not a selector
-    wait — the SSO chain varies and its markup changes. What doesn't change is
-    where you end up.
+    This file is equivalent to a logged-in Avenue session. Anyone with it can
+    act as you until it expires.
     """
-    deadline = asyncio.get_running_loop().time() + LOGIN_TIMEOUT_MS / 1000
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
 
-    while asyncio.get_running_loop().time() < deadline:
-        if page.is_closed():
-            raise asyncio.TimeoutError("Login window was closed.")
-        try:
-            if _is_authenticated_url(page.url, base_url):
-                log.info("Login complete: %s", page.url)
-                return
-        except Exception:
-            pass  # navigation in flight
-        await asyncio.sleep(1.0)
+    # Create with 0600 ALREADY SET, rather than writing at the process umask
+    # (typically 0644) and chmod'ing afterwards. The old order left the cookies
+    # world-readable for the duration of the write.
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    except (OSError, AttributeError):
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    else:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2)
 
-    raise asyncio.TimeoutError("Timed out waiting for sign-in.")
+    try:
+        os.chmod(tmp, 0o600)
+    except (OSError, NotImplementedError):
+        log.debug("could not chmod session file (non-POSIX filesystem?)")
+    tmp.replace(path)
+    try:
+        os.chmod(path, 0o600)
+    except (OSError, NotImplementedError):
+        pass
 
-
-def login_sync(settings: Settings | None = None) -> dict[str, Any]:
-    """Blocking wrapper for the CLI."""
-    if sys.platform == "win32":
-        # Playwright drives browsers via subprocesses, which the selector
-        # event loop can't spawn on Windows.
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    return asyncio.run(login(settings))
+    # Everything above is POSIX-only. On Windows chmod does not touch the ACL,
+    # so without this the file keeps inheriting SYSTEM/Administrators/user
+    # full control while the code above claims 0600. Inert off Windows.
+    if not restrict_to_owner(path):
+        if sys.platform == "win32":
+            log.warning(
+                "Could not restrict %s to your account. It is equivalent to a "
+                "logged-in Avenue session — check its permissions manually.",
+                path,
+            )
