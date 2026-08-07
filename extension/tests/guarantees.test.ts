@@ -108,3 +108,58 @@ describe("institution profiles are honest", () => {
     expect(client).toContain("getCurrentInstitution");
   });
 });
+
+describe("the API key stays on the user's machine", () => {
+  const files = sourceFiles(join(ROOT, "src"));
+
+  it("is only ever written to chrome.storage.local", () => {
+    // storage.sync would push the key to Google's servers and to every other
+    // browser the user is signed into. local is the whole point.
+    const offenders = files.filter((f) => /chrome\.storage\.sync/.test(code(f)));
+    expect(offenders, `storage.sync used in: ${offenders.join(", ")}`).toEqual([]);
+  });
+
+  it("is never logged", () => {
+    const offenders = files.filter((f) => {
+      const src = code(f);
+      return /console\.(log|info|warn|error)\([^)]*(apiKey|api_key|getApiKey)/i.test(src);
+    });
+    expect(offenders, `key reaches a log in: ${offenders.join(", ")}`).toEqual([]);
+  });
+
+  it("is not sent anywhere except the declared LLM host", async () => {
+    const manifest = JSON.parse(readFileSync(join(ROOT, "manifest.json"), "utf8"));
+    const required: string[] = manifest.host_permissions ?? [];
+    // The key can only physically reach hosts the manifest allows, so keeping
+    // that list to the LLM API is what bounds the exposure.
+    expect(required).toEqual(["https://generativelanguage.googleapis.com/*"]);
+  });
+});
+
+describe("every registered tool is callable", () => {
+  it("has a handler, a description, and a schema", async () => {
+    const { TOOLS } = await import("../src/tools/registry.js");
+    expect(TOOLS.length).toBeGreaterThanOrEqual(12);
+    for (const t of TOOLS) {
+      expect(typeof t.handler, `${t.name} handler`).toBe("function");
+      expect(t.description.length, `${t.name} description`).toBeGreaterThan(80);
+      expect(t.parameters.type, `${t.name} schema`).toBe("object");
+    }
+  });
+
+  it("tells the model when NOT to assert on missing data", async () => {
+    const { TOOLS_BY_NAME } = await import("../src/tools/registry.js");
+    // These three carry the honesty rules that cost the most to discover.
+    expect(TOOLS_BY_NAME["list_assignments"]!.description.toLowerCase()).toContain("unknown");
+    expect(TOOLS_BY_NAME["list_quizzes"]!.description.toLowerCase()).toContain("unknown");
+    expect(TOOLS_BY_NAME["analyze_grade_summary"]!.description.toLowerCase()).toContain(
+      "do not estimate",
+    );
+  });
+
+  it("does not advertise a student roster", async () => {
+    const { TOOLS_BY_NAME } = await import("../src/tools/registry.js");
+    const desc = TOOLS_BY_NAME["get_class_list"]!.description.toLowerCase();
+    expect(desc).toContain("does not return a student roster");
+  });
+});
