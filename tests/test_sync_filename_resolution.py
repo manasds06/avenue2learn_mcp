@@ -143,6 +143,52 @@ class TestNoRegressionForInstancesThatAlreadyWork:
         assert client.detail_calls == 0, "no detail fetch needed when Url is present"
 
 
+class TestContentToolPath:
+    """get_course_content builds its own view and had the same bug separately.
+
+    Fixing rag/sync.py did not fix this: with no extension, mime_type came back
+    null and is_renderable false for EVERY topic, so the model would never call
+    get_page_image on a course whose slides render perfectly well. Both call
+    sites now share client/topics.resolve_topic_filename.
+    """
+
+    async def test_extension_mime_and_renderable_all_recovered(self, monkeypatch):
+        from avenue_mcp.client.topics import resolve_topic_filename
+
+        client = FakeClient(LISTING_WITHOUT_URL, TOPIC_DETAIL)
+        node = LISTING_WITHOUT_URL[0]["Structure"][0]
+
+        name, mime = await resolve_topic_filename(client, ORG, node)
+
+        from avenue_mcp.rag import render as renderer
+
+        assert name == "01_Lecture_Notes.pdf"
+        assert mime == "application/pdf"
+        assert renderer.is_renderable(name) is True
+
+    async def test_pptx_is_renderable_too(self):
+        from avenue_mcp.client.topics import resolve_topic_filename
+        from avenue_mcp.rag import render as renderer
+
+        client = FakeClient(LISTING_WITHOUT_URL, TOPIC_DETAIL)
+        node = LISTING_WITHOUT_URL[0]["Structure"][1]
+
+        name, _ = await resolve_topic_filename(client, ORG, node)
+        assert name == "02_Slide_Deck.pptx"
+        assert renderer.is_renderable(name) is True
+
+    async def test_external_link_is_not_renderable(self):
+        from avenue_mcp.client.topics import resolve_topic_filename
+        from avenue_mcp.rag import render as renderer
+
+        client = FakeClient(LISTING_WITHOUT_URL, TOPIC_DETAIL)
+        node = LISTING_WITHOUT_URL[0]["Structure"][2]
+
+        name, mime = await resolve_topic_filename(client, ORG, node)
+        assert not renderer.is_renderable(name or "")
+        assert mime is None
+
+
 class TestDegradation:
     async def test_unreadable_detail_does_not_break_discovery(self):
         """A denied detail route must degrade to "unsupported", not raise --

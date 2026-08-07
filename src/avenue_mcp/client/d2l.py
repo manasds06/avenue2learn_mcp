@@ -224,7 +224,7 @@ class D2LClient:
             async with client.stream(
                 "GET", url, timeout=self.settings.download_timeout_seconds
             ) as resp:
-                self._raise_for_session(resp, url)
+                self._raise_for_session(resp, url, expect_json=False)
                 if resp.status_code >= 400:
                     # The body has not been read on a streaming response, and
                     # _raise_for_status touches resp.text to build its message.
@@ -322,12 +322,23 @@ class D2LClient:
         )
 
     @staticmethod
-    def _raise_for_session(resp: httpx.Response, url: str) -> None:
+    def _raise_for_session(
+        resp: httpx.Response, url: str, *, expect_json: bool = True
+    ) -> None:
         """Expiry detection that does not trust the status code alone.
 
         Brightspace may answer an expired session with a 302 to SSO, or a 200
         whose body is an HTML login form, rather than a clean 401. A naive
         client parses that HTML as JSON and reports a confusing error.
+
+        `expect_json=False` for file downloads, where `text/html` is a perfectly
+        ordinary course file (an instructor uploading a .html page) rather than a
+        sign-in wall. Measured on Carleton: downloading one such file raised
+        SessionExpiredError on a session that was demonstrably alive, telling the
+        user to log in again against a wall that did not exist -- the exact
+        failure the SessionExpired/PermissionDenied split exists to prevent
+        (docs/08). Real downloads carry `Content-Disposition: attachment`, which
+        a login page does not, so that is the discriminator there.
         """
         if 300 <= resp.status_code < 400:
             loc = resp.headers.get("location", "")
@@ -340,9 +351,13 @@ class D2LClient:
         if resp.status_code == 200 and url.startswith("/d2l/api/"):
             ctype = resp.headers.get("content-type", "").lower()
             if "text/html" in ctype:
-                raise SessionExpiredError(
-                    f"Brightspace returned a login page for {url}; the session has expired."
-                )
+                disposition = resp.headers.get("content-disposition", "").lower()
+                served_as_file = "attachment" in disposition or "filename" in disposition
+                if expect_json or not served_as_file:
+                    raise SessionExpiredError(
+                        f"Brightspace returned a login page for {url}; the session "
+                        "has expired."
+                    )
 
     async def _resolve_403(self, exc: "_Ambiguous403") -> None:
         """Turn an ambiguous 403+HTML into the right typed error.

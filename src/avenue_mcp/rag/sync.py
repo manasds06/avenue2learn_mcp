@@ -16,6 +16,7 @@ from typing import Any
 
 from avenue_mcp.client.d2l import D2LClient
 from avenue_mcp.client import models as m
+from avenue_mcp.client.roles import role_map, role_of_post
 from avenue_mcp.config import Settings
 from avenue_mcp.errors import (
     APIError,
@@ -340,6 +341,9 @@ class Syncer:
             return
 
         newest_seen: str | None = None
+        # Fetched once per course, not per thread. Roster is read for id -> role
+        # only; no name ever reaches the index.
+        roles = await role_map(self.client, org_unit_id)
 
         for forum in forums if isinstance(forums, list) else []:
             forum_id = m.as_int(m.pick(forum, "ForumId", "Id"))
@@ -375,7 +379,9 @@ class Syncer:
                     )
                     continue
 
-                normalized = [self._normalize_post(p) for p in posts if isinstance(p, dict)]
+                normalized = [
+                    self._normalize_post(p, roles) for p in posts if isinstance(p, dict)
+                ]
                 normalized = [p for p in normalized if p.get("text")]
                 if not normalized:
                     continue
@@ -427,18 +433,21 @@ class Syncer:
             self.store.set_watermark(org_unit_id, "discussions", newest_seen)
 
     @staticmethod
-    def _normalize_post(post: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_post(
+        post: dict[str, Any], roles: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         """Extract only what we keep. Author NAMES are deliberately dropped --
         role carries the signal, and a name would make the index a durable
-        record of classmates' opinions."""
+        record of classmates' opinions.
+
+        `roles` maps user id -> role for instances whose posts carry no role
+        field. Without it every indexed post is "Unknown", which strips the
+        index of the instructor-vs-classmate distinction that makes forum
+        search worth doing. See client/roles.py."""
         body = m.pick(post, "Message", "Body", "Content", default="")
         if isinstance(body, dict):
             body = m.pick(body, "Html", "Text", "Content", default="")
-        role = m.pick(post, "AuthorRole", "Role", "RoleName")
-        if role is None:
-            role = m.pick(post, "Author", default={})
-            if isinstance(role, dict):
-                role = m.pick(role, "Role", "RoleName", "RoleAlias")
+        role = role_of_post(post, roles)
         return {
             "post_id": m.as_int(m.pick(post, "PostId", "Id")),
             "parent_post_id": m.as_int(m.pick(post, "ParentPostId", "ParentId")),

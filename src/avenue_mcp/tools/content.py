@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from avenue_mcp.client import models as m
+from avenue_mcp.client.topics import resolve_topic_filename
 from avenue_mcp.context import AppContext
 from avenue_mcp.errors import ExtractionError, RenderError
 from avenue_mcp.rag import extract as extractor
@@ -88,7 +89,12 @@ async def get_course_content(
             if topic_id is None:
                 continue
             counter["topics"] += 1
-            file_name = m.guess_filename(node)
+            # Resolved against the topic detail record when the listing omits
+            # Url, otherwise every file reports mime_type null and
+            # is_renderable false. See client/topics.py.
+            file_name, mime_type = await resolve_topic_filename(
+                ctx.client, org_unit_id, node
+            )
             downloadable = m.topic_is_file(node)
             topics.append(
                 {
@@ -97,7 +103,7 @@ async def get_course_content(
                     "title": title or file_name,
                     "type": _topic_type_name(node),
                     "file_name": file_name,
-                    "mime_type": m.mime_from_name(file_name),
+                    "mime_type": mime_type,
                     "last_modified": describe(
                         parse_d2l(m.pick(node, "LastModifiedDate", "LastModified")), tz
                     ),

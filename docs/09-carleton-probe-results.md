@@ -76,6 +76,49 @@ such rather than indexed empty.
 to notice that a field's presence was an assumption. Regression coverage for the
 `Url`-less shape is now in `tests/test_sync_filename_resolution.py`.
 
+## Third finding: posts carry no role, so every author was "Unknown"
+
+Carleton's discussion posts are shaped `{"PostingUserId": …, "PostingUserDisplayName": …,
+"Message": {"Text": "", "Html": "…"}}`. There is no `AuthorRole`, no `Role`, no nested
+`Author.Role` — so `normalize_role` returned `Unknown` for every post and
+`has_instructor_replies` was **always false**.
+
+That guts the feature. An instructor's ruling and a classmate's guess became
+indistinguishable, which is most of the reason to index forums at all.
+
+`PostingUserId` does match the classlist's `Identifier`, so the role is recoverable from the
+roster. [`client/roles.py`](../src/avenue_mcp/client/roles.py) builds an id→role map once per
+course and both the tool and the indexer use it. **Privacy is preserved deliberately:** the
+roster is read for id→role only — names, emails, and OrgDefinedIds are discarded and never
+returned, stored, or indexed, so docs/07's "roles and not names" rule still holds.
+
+Before and after, on a 10-thread forum:
+
+| | Before | After |
+|---|---|---|
+| Threads flagged as having instructor replies | 0 of 10 | **9 of 10** |
+| Role distribution | `Unknown: 15` | `Instructor: 9, Student: 2, TA: 1, Unknown: 3` |
+
+The residual `Unknown: 3` is honest: those users are no longer on the roster (dropped or
+withdrawn), and inventing "Student" for them would be a guess presented as a fact.
+
+Note that post bodies were fine all along — `Message.Text` is empty and `Message.Html`
+carries the content, and the extraction already preferred `Html`.
+
+## Fourth finding: an HTML course file was misread as an expired session
+
+Downloading an instructor-uploaded `.html` file raised `SessionExpiredError` on a session
+that was verifiably alive (57 minutes old, `whoami` 200). `_raise_for_session` treated any
+`200 + text/html` on a `/d2l/api/` path as a sign-in wall — correct for JSON routes, wrong for
+the file-download route, where `text/html` is just a file's content type.
+
+This is the failure mode docs/08's third finding exists to prevent, in a path it did not
+cover: the user is told to log in again against a wall that does not exist.
+
+**Fix:** file downloads pass `expect_json=False`, and there the discriminator is
+`Content-Disposition`. A real download carries `attachment; filename="…"`; a login page does
+not. JSON routes keep the strict rule — HTML there is still a wall.
+
 ## Authentication
 
 The login flow needed **no changes**. `auth/login.py` codes no form selectors, so Carleton's
@@ -124,7 +167,7 @@ Field names are listed where the response shape matters. No values are recorded.
 | `quizzes/{id}/attempts/` | ⛔ 403 | Quiz *attempt* status unavailable; the quiz itself is readable. Same as McMaster. |
 | `discussions/forums/` | ✅ | Non-empty |
 | `discussions/.../topics/` | ✅ | `[]` — forums exist but carry no topics |
-| `discussions/.../posts/` | ⬜ **not reached** | No topics to descend into. **Unverified, not denied.** |
+| `discussions/.../posts/` | ✅ | Verified on another course. Carries `Message.Html`, `ParentPostId`, `PostingUserId` — but **no role field**; see third finding |
 | **`classlist/`** | ✅ **works** | Returns a full roster including `Email` and `OrgDefinedId` — see privacy note |
 | `enrollments/orgUnits/{id}/users/` | ⛔ 403 | Same as McMaster |
 
@@ -136,10 +179,19 @@ there. Identical to McMaster's result. Deadlines must come from `dropbox/folders
 `quizzes/`, which both work — so nothing is lost, but the documented calendar fallback is
 not load-bearing at Carleton either.
 
-**2. `discussion_posts` is unverified, not denied.** The probed course had forums but no
-topics, so the posts route was never exercised. It is recorded as `"unverified"` rather than
-`"permitted"` or `"denied"`. Probing a course with active discussion is the outstanding gap
-here, and it gates the discussions half of the search corpus.
+**2. Most "unsupported file" reports are not files.** One course reported 4 of 55 topics
+indexed, which looks broken and is not: 11 were external links, ~38 were quiz-launcher URLs
+(`/d2l/lp/quizzes/…?type=quiz&rcode=…`), one was a deleted topic whose detail record 404s, and
+exactly 4 were real files. All four indexed. The reason string
+("unsupported file type") is misleading for a quiz launcher, since it is not a file at all --
+worth improving, but it is a reporting-clarity issue rather than a functional one. Note also
+that `files_found` counts topics, not files.
+
+**3. PowerPoint rendering needs LibreOffice**, which is not installed here, so `get_page_image`
+on a `.pptx` raises a clear `RenderError` pointing at `read_content_file` instead. PDF
+rendering works and needs nothing extra. This is environmental and identical at McMaster --
+not a Carleton finding. The error message previously told Windows and macOS users to run
+`sudo apt install`; it now gives platform-correct advice.
 
 **3. `classlist` returns a full roster, including `Email` and `OrgDefinedId`.** More than
 McMaster exposes — McMaster leaves `Email` empty for staff. `get_class_list` still returns
@@ -172,7 +224,7 @@ that is still a prediction until someone probes one.
 | Grades + projection | ✅ weights present |
 | Announcements | ✅ |
 | Quizzes | ✅ list and dates; attempt status blocked |
-| Discussions corpus | ⬜ unverified — needs a course with actual topics |
+| Discussions corpus | ✅ verified — threads indexed and searchable, with instructor/TA attribution |
 | Class roster | Available but withheld by design (FIPPA) |
 | **File search (RAG)** | ✅ verified end to end — download, extract, embed, cite. Required the `Url` back-fill above. |
 
