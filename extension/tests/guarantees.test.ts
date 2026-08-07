@@ -48,36 +48,63 @@ describe("we never touch the session cookie", () => {
   });
 });
 
-describe("we only ever talk to two hosts", () => {
+describe("hosts are declared narrowly and granted per school", () => {
   const manifest = JSON.parse(readFileSync(join(ROOT, "manifest.json"), "utf8"));
 
-  it("declares exactly Avenue and the Gemini API", () => {
+  it("requires only the LLM host up front", () => {
+    // School hosts are OPTIONAL: a McMaster student should never be asked for
+    // access to Carleton's site, and a minimal required set is what Web Store
+    // review should see.
     expect(new Set(manifest.host_permissions)).toEqual(
-      new Set([
-        "https://avenue.cllmcmaster.ca/*",
-        "https://generativelanguage.googleapis.com/*",
-      ]),
+      new Set(["https://generativelanguage.googleapis.com/*"]),
     );
   });
 
-  it("has no server of ours in the manifest", () => {
-    // If a backend is ever added, this test should be updated DELIBERATELY,
-    // with a decision about what that server would see (docs/07).
-    const hosts: string[] = manifest.host_permissions;
-    expect(hosts.some((h) => /avenue-?assistant|herokuapp|fly\.dev|vercel|onrender/.test(h))).toBe(
-      false,
-    );
+  it("offers exactly the school hosts the registry knows about", async () => {
+    const { allOriginPatterns } = await import("../src/institutions.js");
+    expect(new Set(manifest.optional_host_permissions)).toEqual(new Set(allOriginPatterns()));
+  });
+
+  it("has no server of ours in either list", () => {
+    // If a backend is ever added — the shared-key proxy, say — this test
+    // should fail and be updated DELIBERATELY, with a decision about what
+    // that server would see (docs/07).
+    const hosts: string[] = [
+      ...(manifest.host_permissions ?? []),
+      ...(manifest.optional_host_permissions ?? []),
+    ];
+    expect(hosts.some((h) => /assistant|herokuapp|fly\.dev|vercel|onrender/.test(h))).toBe(false);
   });
 });
 
-describe("the Avenue host is the Brightspace one", () => {
-  it("is avenue.cllmcmaster.ca, not avenue.mcmaster.ca", async () => {
-    const client = readFileSync(join(ROOT, "src/avenue/client.ts"), "utf8");
+describe("institution profiles are honest", () => {
+  it("McMaster points at the Brightspace host, not the landing page", async () => {
+    const { MCMASTER } = await import("../src/institutions.js");
     // avenue.mcmaster.ca is a static Apache landing page where every /d2l/*
-    // path 404s. Getting this wrong breaks every tool on first use (docs/08).
-    expect(client).toContain("https://avenue.cllmcmaster.ca");
-    expect(code(join(ROOT, "src/avenue/client.ts"))).not.toMatch(
-      /https:\/\/avenue\.mcmaster\.ca/,
-    );
+    // path 404s. Login STARTS there and ENDS on the Brightspace host.
+    expect(MCMASTER.baseUrl).toBe("https://avenue.cllmcmaster.ca");
+    expect(MCMASTER.loginUrl).toContain("avenue.mcmaster.ca");
+  });
+
+  it("no school hardcodes another school's brand", async () => {
+    const { INSTITUTIONS } = await import("../src/institutions.js");
+    // "Avenue to Learn" is McMaster's name alone. Calling Carleton's LMS
+    // "Avenue" in text a student reads is simply wrong.
+    for (const inst of Object.values(INSTITUTIONS)) {
+      if (inst.id !== "mcmaster") expect(inst.lmsName).not.toMatch(/avenue/i);
+    }
+  });
+
+  it("unprobed capabilities report unverified, never a guess", async () => {
+    const { capability, CARLETON } = await import("../src/institutions.js");
+    expect(capability(CARLETON, "course_details")).not.toBe("unverified");
+    // A key nobody has measured must not inherit another school's answer.
+    expect(capability({ ...CARLETON, capabilities: {} }, "classlist")).toBe("unverified");
+  });
+
+  it("the client resolves the host at runtime rather than hardcoding one", () => {
+    const client = code(join(ROOT, "src/avenue/client.ts"));
+    expect(client).not.toMatch(/const BASE_URL\s*=/);
+    expect(client).toContain("getCurrentInstitution");
   });
 });

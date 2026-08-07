@@ -18,7 +18,9 @@
  */
 
 import {
+  type Brand,
   AvenueError,
+  hostNotGranted,
   invalidRequest,
   network,
   notFound,
@@ -26,8 +28,15 @@ import {
   permissionDenied,
   upstream,
 } from "./errors.js";
+import { type Institution, originPattern } from "../institutions.js";
+import { getCurrentInstitution } from "../settings.js";
 
-export const BASE_URL = "https://avenue.cllmcmaster.ca";
+/**
+ * The host is resolved per request from the user's selected school, not
+ * hardcoded. Versions are cached PER INSTITUTION — Brightspace releases differ
+ * between schools, and reusing McMaster's `le 1.96` against another instance
+ * would build wrong paths.
+ */
 
 export type Component = "lp" | "le";
 
@@ -41,7 +50,8 @@ const MIN_INTERVAL_MS = 100;
 const MAX_ATTEMPTS = 3;
 
 export class AvenueClient {
-  private versions: Record<string, string> | null = null;
+  /** Keyed by institution id: Brightspace releases differ between schools. */
+  private versionsByInstitution = new Map<string, Record<string, string>>();
   private inFlight = 0;
   private queue: Array<() => void> = [];
   private lastStart = 0;
@@ -63,6 +73,29 @@ export class AvenueClient {
     this.queue.shift()?.();
   }
 
+  // --- institution -------------------------------------------------------
+
+  /**
+   * The active school, plus a check that we may actually talk to it.
+   *
+   * Chrome silently fails cross-origin fetches to hosts the extension has not
+   * been granted, which surfaces as an opaque network error. Checking first
+   * turns that into an actionable "choose your school" message.
+   */
+  private async target(): Promise<{ inst: Institution; brand: Brand }> {
+    const inst = await getCurrentInstitution();
+    const brand: Brand = {
+      lmsName: inst.lmsName,
+      credentialBrand: inst.credentialBrand,
+      loginUrl: inst.loginUrl,
+    };
+    const granted = await chrome.permissions.contains({
+      origins: [originPattern(inst)],
+    });
+    if (!granted) throw hostNotGranted(brand, originPattern(inst));
+    return { inst, brand };
+  }
+
   // --- versions ----------------------------------------------------------
 
   /**
@@ -71,7 +104,9 @@ export class AvenueClient {
    * so a hardcoded `1.57` is a time bomb. Cached for the worker's lifetime.
    */
   async getVersions(): Promise<Record<string, string>> {
-    if (this.versions) return this.versions;
+    const { inst } = await this.target();
+    const cached = this.versionsByInstitution.get(inst.id);
+    if (cached) return cached;
 
     try {
       const data = await this.rawJson("GET", "/d2l/api/versions/");
@@ -83,15 +118,15 @@ export class AvenueClient {
           if (code && typeof latest === "string") found[code] = latest;
         }
       }
-      this.versions = { ...FALLBACK_VERSIONS, ...found };
+      this.versionsByInstitution.set(inst.id, { ...FALLBACK_VERSIONS, ...found });
     } catch (err) {
       // A signed-out user can't negotiate either. Surface that honestly rather
       // than silently falling back to 1.0 and failing later somewhere less
       // obvious.
       if (err instanceof AvenueError) throw err;
-      this.versions = { ...FALLBACK_VERSIONS };
+      this.versionsByInstitution.set(inst.id, { ...FALLBACK_VERSIONS });
     }
-    return this.versions;
+    return this.versionsByInstitution.get(inst.id)!;
   }
 
   async path(component: Component, suffix: string): Promise<string> {
@@ -106,8 +141,10 @@ export class AvenueClient {
     method: string,
     path: string,
     params?: Record<string, string | number | undefined>,
+    target?: { inst: Institution; brand: Brand },
   ): Promise<unknown> {
-    const url = new URL(path, BASE_URL);
+    const { inst, brand } = target ?? (await this.target());
+    const url = new URL(path, inst.baseUrl);
     for (const [k, v] of Object.entries(params ?? {})) {
       if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, String(v));
     }
@@ -142,17 +179,18 @@ export class AvenueClient {
         continue;
       }
 
-      return await this.parse(resp, path);
+      return await this.parse(resp, path, brand);
     }
   }
 
-  private async parse(resp: Response, path: string): Promise<unknown> {
+  private async parse(resp: Response, path: string, brand: Brand): Promise<unknown> {
     const ctype = (resp.headers.get("content-type") ?? "").toLowerCase();
     const isJson = ctype.includes("json");
 
     if (resp.ok) {
       // A JSON route answering with HTML is the sign-in wall, even at 200.
-      if (!isJson) throw notSignedIn(`Avenue returned a sign-in page for ${path}.`);
+      if (!isJson)
+        throw notSignedIn(brand, `${brand.lmsName} returned a sign-in page for ${path}.`);
       try {
         return await resp.json();
       } catch {
@@ -160,13 +198,13 @@ export class AvenueClient {
       }
     }
 
-    if (resp.status === 401) throw notSignedIn();
+    if (resp.status === 401) throw notSignedIn(brand);
 
     if (resp.status === 403) {
       // Both meanings arrive as 403 (docs/08). Signed-out Avenue answers with
       // HTML; a genuine permission denial answers with JSON. Getting this
       // backwards sends the user to re-login against a wall that never moves.
-      throw isJson ? permissionDenied(path) : notSignedIn();
+      throw isJson ? permissionDenied(path, brand) : notSignedIn(brand);
     }
 
     if (resp.status === 404) throw notFound(path);
@@ -180,7 +218,8 @@ export class AvenueClient {
     suffix: string,
     params?: Record<string, string | number | undefined>,
   ): Promise<unknown> {
-    return this.rawJson("GET", await this.path(component, suffix), params);
+    const target = await this.target();
+    return this.rawJson("GET", await this.path(component, suffix), params, target);
   }
 
   /**
@@ -195,12 +234,13 @@ export class AvenueClient {
     params?: Record<string, string | number | undefined>,
     maxPages = 50,
   ): Promise<unknown[]> {
+    const target = await this.target();
     const path = await this.path(component, suffix);
     const items: unknown[] = [];
     let bookmark: string | undefined;
 
     for (let page = 0; page < maxPages; page++) {
-      const data = await this.rawJson("GET", path, { ...params, bookmark });
+      const data = await this.rawJson("GET", path, { ...params, bookmark }, target);
 
       if (Array.isArray(data)) {
         items.push(...data);
@@ -220,6 +260,11 @@ export class AvenueClient {
     }
 
     return items;
+  }
+
+  /** Active school's origin, for resolving relative links in HTML bodies. */
+  async baseUrl(): Promise<string> {
+    return (await getCurrentInstitution()).baseUrl;
   }
 }
 

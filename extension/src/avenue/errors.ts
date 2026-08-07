@@ -21,7 +21,9 @@ export type ErrorKind =
   | "InvalidRequest"
   | "Upstream"
   | "Network"
-  | "Config";
+  | "Config"
+  /** The user has not granted this extension access to their school's host. */
+  | "HostNotGranted";
 
 export class AvenueError extends Error {
   readonly kind: ErrorKind;
@@ -40,44 +42,63 @@ export class AvenueError extends Error {
   }
 }
 
-export const notSignedIn = (detail = "You are not signed in to Avenue.") =>
+/**
+ * Messages name the school's own brand — "Avenue to Learn" for McMaster,
+ * "Brightspace" for Carleton — because telling a Carleton student to sign in
+ * to Avenue is simply wrong.
+ */
+export interface Brand {
+  lmsName: string;
+  credentialBrand: string;
+  loginUrl: string;
+}
+
+export const notSignedIn = (brand: Brand, detail?: string) =>
   new AvenueError(
     "NotSignedIn",
-    detail,
-    "Open https://avenue.cllmcmaster.ca in a tab and sign in with your MacID, then ask again.",
+    detail ?? `You are not signed in to ${brand.lmsName}.`,
+    `Open ${brand.loginUrl} in a tab and sign in with your ${brand.credentialBrand}, then ask again.`,
   );
 
-export const permissionDenied = (route: string) =>
+export const hostNotGranted = (brand: Brand, origin: string) =>
+  new AvenueError(
+    "HostNotGranted",
+    `This extension has not been granted access to ${brand.lmsName} (${origin}).`,
+    "Open the side panel and choose your school — Chrome will ask you to allow access. This has to be a click, so it cannot be done automatically.",
+  );
+
+export const permissionDenied = (route: string, brand: Brand, weight?: string) =>
   new AvenueError(
     "PermissionDenied",
-    `Your Avenue account cannot read ${route} — it is likely instructor-only.`,
+    `Your ${brand.lmsName} account cannot read ${route} — it is likely instructor-only.` +
+      (weight ? ` ${weight}` : ""),
     "This is not a sign-in problem; signing in again will not help. Tell the user this data is not available to student accounts.",
   );
 
 export const notFound = (route: string) =>
   new AvenueError(
     "NotFound",
-    `Avenue has no such item at ${route}.`,
+    `Brightspace has no such item at ${route}.`,
     "Check the ID. list_courses returns valid org_unit_id values.",
   );
 
 export const invalidRequest = (route: string, detail: string) =>
   new AvenueError(
     "InvalidRequest",
-    `Avenue rejected the request to ${route}. ${detail}`.trim(),
+    `Brightspace rejected the request to ${route}. ${detail}`.trim(),
     "Check the parameters passed to this tool.",
   );
 
 export const upstream = (route: string, status: number) =>
   new AvenueError(
     "Upstream",
-    `Avenue returned ${status} for ${route}.`,
-    "This is an Avenue-side problem. Wait a moment and retry.",
+    `Brightspace returned ${status} for ${route}.`,
+    "This is a server-side problem. Wait a moment and retry.",
   );
 
 export const network = (route: string, detail: string) =>
   new AvenueError(
     "Network",
-    `Could not reach Avenue for ${route}. ${detail}`.trim(),
+    `Could not reach your school's Brightspace for ${route}. ${detail}`.trim(),
     "Check your internet connection, then retry.",
   );

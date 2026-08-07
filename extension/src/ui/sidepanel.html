@@ -2,17 +2,26 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Avenue Assistant</title>
+    <title>Brightspace Assistant</title>
     <link rel="stylesheet" href="sidepanel.css" />
   </head>
   <body>
     <header>
-      <h1>Avenue Assistant</h1>
-      <p class="sub">Step 3 checkpoint — proving the extension can reach Avenue.</p>
+      <h1>Brightspace Assistant</h1>
+      <p class="sub">Checkpoint build — proving the extension can reach your school.</p>
     </header>
 
     <main>
+      <label for="school">Your school</label>
+      <select id="school"></select>
+
+      <div id="grant-row" hidden>
+        <p class="hint" id="grant-hint"></p>
+        <button id="grant" type="button">Allow access</button>
+      </div>
+
       <button id="check" type="button">List my courses</button>
+
       <div id="status" role="status"></div>
       <pre id="out"></pre>
     </main>

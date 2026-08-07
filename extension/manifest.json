@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Avenue Assistant",
+  "name": "Brightspace Assistant",
   "version": "0.1.0",
-  "description": "Ask about your McMaster Avenue to Learn courses — deadlines, grades, announcements — answered from your real course data.",
+  "description": "Ask about your university's Brightspace courses — deadlines, grades, announcements — answered from your real course data.",
 
   "permissions": [
     "storage",
@@ -10,8 +10,13 @@
   ],
 
   "host_permissions": [
-    "https://avenue.cllmcmaster.ca/*",
     "https://generativelanguage.googleapis.com/*"
+  ],
+
+  "optional_host_permissions": [
+    "https://avenue.cllmcmaster.ca/*",
+    "https://avenue.mcmaster.ca/*",
+    "https://brightspace.carleton.ca/*"
   ],
 
   "background": {
@@ -24,7 +29,7 @@
   },
 
   "action": {
-    "default_title": "Avenue Assistant"
+    "default_title": "Brightspace Assistant"
   },
 
   "minimum_chrome_version": "116"

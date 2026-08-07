@@ -2,7 +2,7 @@
  * list_announcements — ported from src/avenue_mcp/tools/announcements.py.
  */
 
-import { BASE_URL, avenue } from "../avenue/client.js";
+import { avenue } from "../avenue/client.js";
 import { describe, nowUtc, parseD2L } from "../avenue/dates.js";
 import { asInt, isObj, pick, richText, toTextAndLinks, truncate } from "../avenue/models.js";
 import { courseName } from "./context.js";
@@ -19,6 +19,7 @@ export async function listAnnouncements(args: {
   const now = nowUtc();
   const cutoff = args.since ? parseD2L(args.since) : null;
 
+  const baseUrl = await avenue.baseUrl();
   const raw = await avenue.getPaged("le", `${org_unit_id}/news/`);
   const items = [];
 
@@ -31,7 +32,7 @@ export async function listAnnouncements(args: {
     if (ends && ends < now) continue; // expired
     if (cutoff && posted && posted <= cutoff) continue;
 
-    const { text, links } = toTextAndLinks(richText(pick(entry, "Body", "Content")), BASE_URL);
+    const { text, links } = toTextAndLinks(richText(pick(entry, "Body", "Content")), baseUrl);
     const capped = truncate(text, BODY_CAP);
 
     items.push({

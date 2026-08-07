@@ -63,3 +63,39 @@ pre {
   border-radius: 6px;
 }
 pre:empty { display: none; }
+
+label {
+  display: block;
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+select {
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 14px;
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+#grant-row {
+  padding: 12px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+#grant-row button { margin: 0; }
+#check { margin-top: 2px; }
