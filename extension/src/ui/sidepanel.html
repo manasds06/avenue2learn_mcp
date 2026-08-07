@@ -8,27 +8,40 @@
   <body>
     <header>
       <h1>Brightspace Assistant</h1>
-      <p class="sub">Checkpoint build — proving the extension can reach your school.</p>
+      <p class="sub">Checkpoint build — tools work, the chat loop is next.</p>
     </header>
 
     <main>
-      <label for="school">Your school</label>
-      <select id="school"></select>
+      <details id="setup" open>
+        <summary>Setup</summary>
 
-      <div id="grant-row" hidden>
-        <p class="hint" id="grant-hint"></p>
-        <button id="grant" type="button">Allow access</button>
-      </div>
+        <label for="school">Your school</label>
+        <select id="school"></select>
 
-      <label for="apikey">Gemini API key</label>
-      <div class="key-row">
-        <input id="apikey" type="password" autocomplete="off" spellcheck="false"
-               placeholder="AIza…" />
-        <button id="save-key" type="button" class="secondary">Save</button>
-      </div>
-      <p class="hint" id="key-hint"></p>
+        <div id="grant-row" hidden>
+          <p class="hint" id="grant-hint"></p>
+          <button id="grant" type="button">Allow access</button>
+        </div>
 
-      <button id="check" type="button">List my courses</button>
+        <label for="apikey">Gemini API key</label>
+        <div class="key-row">
+          <input id="apikey" type="password" autocomplete="off" spellcheck="false"
+                 placeholder="AIza…" />
+          <button id="save-key" type="button" class="secondary">Save</button>
+        </div>
+        <p class="hint" id="key-hint"></p>
+      </details>
+
+      <hr />
+
+      <label for="tool">Tool</label>
+      <select id="tool"></select>
+      <p class="hint" id="tool-desc"></p>
+
+      <label for="args">Arguments (JSON)</label>
+      <textarea id="args" rows="4" spellcheck="false"></textarea>
+
+      <button id="run" type="button">Run tool</button>
 
       <div id="status" role="status"></div>
       <pre id="out"></pre>

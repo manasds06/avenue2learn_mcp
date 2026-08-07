@@ -127,3 +127,43 @@ button.secondary {
 }
 
 #key-hint { margin-bottom: 16px; }
+
+details#setup {
+  margin-bottom: 4px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+details#setup summary {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+details#setup[open] summary { margin-bottom: 12px; }
+
+hr {
+  margin: 16px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+textarea {
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  font: 12px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  resize: vertical;
+}
+
+#tool-desc {
+  max-height: 6.5em;
+  overflow-y: auto;
+  margin-bottom: 14px;
+}
+
+#out { max-height: 45vh; overflow: auto; white-space: pre; }
