@@ -54,7 +54,11 @@ async def get_class_list(ctx: AppContext, org_unit_id: int) -> dict[str, Any]:
     except APIError as exc:
         note = f"Could not read the class list: {exc}"
 
-    if not instructors:
+    # Only reach for the fallback if the classlist itself failed. When it
+    # succeeded but simply lists no staff, the enrollments route's 403 would
+    # otherwise overwrite the note with "the class list is not available" --
+    # about a route that just answered.
+    if not instructors and not roster_available:
         found, staff_note = await _staff_via_enrollments(ctx, org_unit_id)
         instructors.extend(found)
         if staff_note and not note:
@@ -66,20 +70,52 @@ async def get_class_list(ctx: AppContext, org_unit_id: int) -> dict[str, Any]:
             "the API. Check the course homepage on Avenue directly."
         )
 
+    if instructors and not any(i.get("email") for i in instructors):
+        # Measured 2026-08-07: the classlist route populates DisplayName,
+        # FirstName, LastName, Username and Identifier, but leaves Email empty
+        # for staff. Username is present and McMaster addresses are
+        # conventionally <macid>@mcmaster.ca -- but composing one would be a
+        # guess presented as a contact detail, so the tool reports the gap.
+        contact_note = (
+            "Avenue did not provide email addresses for course staff. Names and "
+            "roles are accurate; find contact details on the course homepage or "
+            "in the outline rather than guessing an address."
+        )
+        note = f"{note} {contact_note}" if note else contact_note
+
+    if students and not note:
+        # Withholding this is a deliberate choice, not a limitation, so say so
+        # rather than letting an empty array read as "no classmates found".
+        note = (
+            f"{len(students)} student records were returned by Avenue but are "
+            f"deliberately not included here. A roster with names and emails is "
+            f"personal information under FIPPA, and this tool returns course "
+            f"staff by design. Ask the user to look them up on Avenue directly "
+            f"if they genuinely need a classmate's contact details."
+        )
+
     return {
         "org_unit_id": org_unit_id,
         "course_name": await ctx.course_name(org_unit_id),
         "instructors": instructors,
-        "students": students if roster_available else [],
-        "student_roster_available": roster_available and bool(students),
+        # NOT returned in bulk, even when Avenue hands them over.
+        #
+        # Both implementations of this tool were written expecting a 403 here,
+        # per docs/02 and docs/07. The live probe found the route DOES work for
+        # students -- 145 classmates with names, emails, usernames, and
+        # OrgDefinedIds on a single course. Passing that array back means every
+        # call ships a third of a lecture hall's personal information to
+        # whatever model provider the MCP client uses.
+        #
+        # docs/07 is unambiguous that this data is FIPPA-protected and must not
+        # be exported or persisted, and says the tool "is designed to return
+        # instructor contacts". Honouring that is more important than surfacing
+        # a roster nobody asked for. The count answers "how big is this class"
+        # without handing over the list.
+        "students": [],
+        "student_roster_returned": False,
         "student_count": len(students) if roster_available else None,
         "note": note,
-        "privacy_reminder": (
-            "Any names or emails returned here are other people's personal "
-            "information. Do not export, persist, or redistribute them."
-        )
-        if students
-        else None,
     }
 
 
@@ -122,7 +158,21 @@ def _person(entry: dict[str, Any]) -> dict[str, Any]:
     # Name-bearing keys FIRST. D2L classlist entries carry RoleId as an integer,
     # and normalize_role(103) matches no hint -> "Unknown" for everyone, which
     # put the instructors in the students array and left `instructors` empty.
-    role_raw = m.pick(entry, "Role", "RoleName", "RoleDisplayName", "RoleAlias")
+    # `ClasslistRoleDisplayName` is what the live classlist route actually
+    # returns (measured 2026-08-07: "Instructor" x1, "TA 1" x10, "Student"
+    # x134). It was absent from this list, so every entry normalized to
+    # "Unknown", every person landed in `students`, `instructors` came back
+    # empty -- and the empty-instructors branch then fired the enrollments
+    # fallback, whose 403 overwrote the note with "the class list is not
+    # available" about a route that had just returned 145 rows.
+    role_raw = m.pick(
+        entry,
+        "ClasslistRoleDisplayName",
+        "Role",
+        "RoleName",
+        "RoleDisplayName",
+        "RoleAlias",
+    )
     if isinstance(role_raw, dict):
         role_raw = m.pick(role_raw, "Name", "Code")
     role = m.normalize_role(role_raw)

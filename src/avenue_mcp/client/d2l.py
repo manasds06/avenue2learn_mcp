@@ -12,6 +12,7 @@ Knows nothing about MCP -- usable from a script or a test. Handles:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -37,11 +38,26 @@ Component = Literal["lp", "le"]
 _FALLBACK_VERSIONS: dict[str, str] = {"lp": "1.0", "le": "1.0"}
 
 
+
+class _Ambiguous403(Exception):
+    """A 403 with an HTML body: either the sign-in wall or a real permission
+    denial. Only a liveness probe separates them, so this never escapes the
+    client -- D2LClient._resolve_403 converts it."""
+
+    def __init__(self, url: str, detail: str = "") -> None:
+        super().__init__(url)
+        self.url = url
+        self.detail = detail
+
+
 class D2LClient:
     """Thin async wrapper over the Valence API."""
 
     def __init__(self, auth: CookieSessionAuth, settings: Settings) -> None:
         self.auth = auth
+        # Cache for the 403 disambiguation above.
+        self._session_alive: bool = True
+        self._liveness_checked_at: float | None = None
         self.settings = settings
         self._versions: dict[str, str] | None = None
         self._throttle = Throttle(
@@ -217,7 +233,10 @@ class D2LClient:
                     # PermissionDeniedError -- i.e. an expired session mid-sync
                     # produced 40 unintelligible errors instead of "log in again".
                     await resp.aread()
-                self._raise_for_status(resp, url)
+                try:
+                    self._raise_for_status(resp, url)
+                except _Ambiguous403 as amb:
+                    await self._resolve_403(amb)
 
                 ctype = resp.headers.get("content-type", "")
                 filename = _filename_from(resp.headers.get("content-disposition"))
@@ -274,7 +293,10 @@ class D2LClient:
                     headers=headers,
                 )
             self._raise_for_session(resp, url)
-            self._raise_for_status(resp, url)
+            try:
+                self._raise_for_status(resp, url)
+            except _Ambiguous403 as amb:
+                await self._resolve_403(amb)
             if not resp.content:
                 return None
             try:
@@ -322,6 +344,29 @@ class D2LClient:
                     f"Avenue returned a login page for {url}; the session has expired."
                 )
 
+    async def _resolve_403(self, exc: "_Ambiguous403") -> None:
+        """Turn an ambiguous 403+HTML into the right typed error.
+
+        One extra request, only on a 403, and the answer is cached briefly so a
+        burst (a sync touching 40 topics) probes once rather than 40 times.
+        """
+        now = time.monotonic()
+        if self._liveness_checked_at is None or now - self._liveness_checked_at > 30.0:
+            try:
+                self._session_alive = await self.auth.is_alive()
+            except Exception:  # noqa: BLE001 - a failed probe is not an answer
+                self._session_alive = False
+            self._liveness_checked_at = now
+
+        if self._session_alive:
+            raise PermissionDeniedError(
+                f"Access denied for {exc.url}. Your account cannot read this on "
+                f"Avenue -- it is likely instructor-only. {exc.detail}".strip()
+            )
+        raise SessionExpiredError(
+            f"Avenue returned its sign-in wall for {exc.url}; the session is not valid."
+        )
+
     @staticmethod
     def _raise_for_status(resp: httpx.Response, url: str) -> None:
         code = resp.status_code
@@ -350,10 +395,25 @@ class D2LClient:
             # back as JSON, because the API is answering us rather than
             # bouncing us to a login page.
             if "html" in ctype:
-                raise SessionExpiredError(
-                    f"Avenue returned its sign-in wall for {url}; "
-                    "the session is not valid."
-                )
+                # ...but content-type alone cannot tell them apart. Measured on
+                # the live host with a VALID session:
+                #
+                #   GET /d2l/api/lp/1.62/courses/{id}
+                #   -> 403, content-type: text/html, body: "Forbidden"
+                #
+                # while whoami returns 200 JSON on that same session. So an
+                # authenticated permission denial *also* arrives as 403+HTML,
+                # and reporting "the session is not valid" sends the user to
+                # re-login against a wall that will never move.
+                #
+                # Worse, SessionExpiredError is an AuthError, not an APIError,
+                # so it slips past every `except PermissionDeniedError` /
+                # `except APIError` degradation arm in tools/ and fails the
+                # whole call instead of degrading.
+                #
+                # Liveness is the only signal that actually separates them, and
+                # the caller resolves it -- this function is sync.
+                raise _Ambiguous403(url, detail)
             raise PermissionDeniedError(f"Access denied for {url}. {detail}".strip())
         if code == 404:
             raise NotFoundError(f"Not found: {url}. {detail}".strip())

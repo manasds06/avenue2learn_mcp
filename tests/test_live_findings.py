@@ -60,12 +60,59 @@ class TestAnonymous403:
     exact opposite of the truth.
     """
 
-    def test_403_with_html_is_session_expired(self):
-        with pytest.raises(SessionExpiredError):
+    def test_403_with_html_is_ambiguous_at_the_sync_layer(self):
+        """403+HTML cannot be classified without knowing if the session is alive.
+
+        Measured on the live host with a VALID session:
+            GET /d2l/api/lp/1.62/courses/{id} -> 403, text/html, body "Forbidden"
+        while whoami returns 200 JSON on that same session. So 403+HTML is NOT
+        exclusively the sign-in wall, and _raise_for_status defers rather than
+        guessing. _resolve_403 settles it with a liveness probe.
+        """
+        from avenue_mcp.client.d2l import _Ambiguous403
+
+        with pytest.raises(_Ambiguous403):
             D2LClient._raise_for_status(
                 resp(403, ctype="text/html; charset=utf-8", text="<html>Sign in</html>"),
                 "/d2l/api/lp/1.0/users/whoami",
             )
+
+    async def test_dead_session_resolves_to_session_expired(self):
+        """The logged-out case: signing in again IS the fix."""
+        from avenue_mcp.client.d2l import _Ambiguous403
+
+        client = D2LClient.__new__(D2LClient)
+        client._session_alive = False
+        client._liveness_checked_at = None
+
+        async def _dead() -> bool:
+            return False
+
+        client.auth = type("A", (), {"is_alive": staticmethod(_dead)})()
+
+        with pytest.raises(SessionExpiredError):
+            await client._resolve_403(_Ambiguous403("/d2l/api/lp/1.0/users/whoami"))
+
+    async def test_live_session_resolves_to_permission_denied(self):
+        """The authenticated-but-forbidden case: re-login would be a dead end.
+
+        This is the one the old content-type heuristic got backwards, and it
+        matters twice over -- SessionExpiredError is an AuthError, so it also
+        slips past every `except PermissionDeniedError` degradation arm.
+        """
+        from avenue_mcp.client.d2l import _Ambiguous403
+
+        client = D2LClient.__new__(D2LClient)
+        client._session_alive = True
+        client._liveness_checked_at = None
+
+        async def _alive() -> bool:
+            return True
+
+        client.auth = type("A", (), {"is_alive": staticmethod(_alive)})()
+
+        with pytest.raises(PermissionDeniedError):
+            await client._resolve_403(_Ambiguous403("/d2l/api/lp/1.62/courses/719899"))
 
     def test_403_with_json_is_permission_denied(self):
         """An authenticated session genuinely lacking access answers in JSON."""
@@ -77,11 +124,14 @@ class TestAnonymous403:
 
     def test_the_two_are_not_collapsed(self):
         """One is fixed by logging in; the other never will be."""
+        from avenue_mcp.client.d2l import _Ambiguous403
+
         html_err = json_err = None
         try:
             D2LClient._raise_for_status(resp(403, ctype="text/html"), "/x")
         except Exception as e:
             html_err = type(e)
+        assert html_err is _Ambiguous403
         try:
             D2LClient._raise_for_status(resp(403, ctype="application/json"), "/x")
         except Exception as e:

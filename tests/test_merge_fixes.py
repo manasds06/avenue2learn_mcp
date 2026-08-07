@@ -106,9 +106,16 @@ class TestCalendarRequiresDateRange:
         assert "startDateTime" in seen, "calendar called without the required window"
         assert "endDateTime" in seen
 
-        # Both must be UTC instants the API will accept, and ordered.
-        start = datetime.strptime(seen["startDateTime"][0], "%Y-%m-%dT%H:%M:%SZ")
-        end = datetime.strptime(seen["endDateTime"][0], "%Y-%m-%dT%H:%M:%SZ")
+        # Milliseconds are REQUIRED, not cosmetic: the live host rejects
+        # `...T00:00:00Z` with the same 400 it gives for omitting the param.
+        fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+        for key in ("startDateTime", "endDateTime"):
+            assert seen[key][0].endswith(".000Z"), (
+                f"{key}={seen[key][0]!r} lacks milliseconds; Valence returns 400"
+            )
+
+        start = datetime.strptime(seen["startDateTime"][0], fmt)
+        end = datetime.strptime(seen["endDateTime"][0], fmt)
         assert start < end
 
         # The window must actually span now, or it returns nothing that matters.
@@ -239,3 +246,100 @@ class TestSessionFilePermissions:
         assert "Administrators" not in after
         # And it must still be readable by us.
         assert target.read_text(encoding="utf-8") == "{}"
+
+
+class TestSubmissionStatusIsNotAsserted:
+    """`mysubmissions` is 403 on avenue.cllmcmaster.ca despite being documented
+    as a Learner route (docs/08, 2026-08-07).
+
+    The tool defaulted every record to "not_submitted" and only upgraded it on a
+    successful read, so a blocked route silently became "you have not submitted
+    this" for every assignment in the course -- a confidently wrong answer about
+    a deadline.
+    """
+
+    @pytest.mark.asyncio
+    async def test_blocked_route_yields_unknown_not_not_submitted(
+        self, tmp_path, monkeypatch
+    ):
+        def handler(request: httpx.Request) -> httpx.Response:
+            p = request.url.path
+            if p == "/d2l/api/versions/":
+                return _json(
+                    [
+                        {"ProductCode": "lp", "LatestVersion": "1.62"},
+                        {"ProductCode": "le", "LatestVersion": "1.96"},
+                    ]
+                )
+            if "mysubmissions" in p:
+                # What the live host actually does.
+                return httpx.Response(
+                    403,
+                    content='{"Errors":[{"Message":"Not authorized"}]}',
+                    headers={"content-type": "application/json"},
+                )
+            if p.endswith("/dropbox/folders/"):
+                return _json(
+                    [{"Id": 7, "Name": "Assignment 3", "DueDate": "2099-01-01T04:59:00.000Z"}]
+                )
+            return _json([])
+
+        ctx = _ctx_with(handler, tmp_path, monkeypatch)
+        try:
+            from avenue_mcp.tools.assignments import list_assignments
+
+            out = await list_assignments(ctx, 111)
+        finally:
+            await ctx.aclose()
+
+        assert out["assignments"], "the folder listing itself must still work"
+        for a in out["assignments"]:
+            assert a["submission_status"] == "unknown", (
+                "a blocked submissions route must not be reported as 'not_submitted'"
+            )
+
+        assert out["submission_status_available"] is False
+        assert "unknown" in (out.get("note") or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_readable_route_still_reports_submitted(self, tmp_path, monkeypatch):
+        """The fix must not blind the tool where the route DOES work."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            p = request.url.path
+            if p == "/d2l/api/versions/":
+                return _json(
+                    [
+                        {"ProductCode": "lp", "LatestVersion": "1.62"},
+                        {"ProductCode": "le", "LatestVersion": "1.96"},
+                    ]
+                )
+            if "mysubmissions" in p:
+                return _json(
+                    [
+                        {
+                            "Submissions": [
+                                {
+                                    "SubmissionDate": "2026-01-02T10:00:00.000Z",
+                                    "Files": [{"FileName": "a3.pdf"}],
+                                }
+                            ]
+                        }
+                    ]
+                )
+            if p.endswith("/dropbox/folders/"):
+                return _json(
+                    [{"Id": 7, "Name": "Assignment 3", "DueDate": "2099-01-01T04:59:00.000Z"}]
+                )
+            return _json([])
+
+        ctx = _ctx_with(handler, tmp_path, monkeypatch)
+        try:
+            from avenue_mcp.tools.assignments import list_assignments
+
+            out = await list_assignments(ctx, 111)
+        finally:
+            await ctx.aclose()
+
+        assert out["submission_status_available"] is True
+        assert out["assignments"][0]["submission_status"] == "submitted"

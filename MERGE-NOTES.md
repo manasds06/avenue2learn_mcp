@@ -141,3 +141,17 @@ Unchanged by this merge, and still the blocker: **nobody has logged in yet.**
 That settles which auth strategy works (§5 above), and the six ⚠️ routes in [`docs/02-api-surface.md`](docs/02-api-surface.md) that decide whether three tools ship full or degraded. Write findings into [`docs/08-api-probe-results.md`](docs/08-api-probe-results.md), then update `docs/02` **from** them.
 
 Two of the four fixes above are unverifiable until then — they are correct per the Valence documentation, but only a live call proves it. If `list_courses` returns empty after a successful login, see the host note in [`HANDOFF.md`](HANDOFF.md#2-watch-for-this).
+
+---
+
+## Postscript — the login happened (2026-08-07)
+
+**All four fixes are confirmed against the live host**, and the probe found five more defects that only real data exposes. Full results in [`docs/08-api-probe-results.md`](docs/08-api-probe-results.md); the short version:
+
+- **Auth: cookies work.** `CookieSessionAuth` is the strategy, the browser stays a login-only step, and neither bearer fallback needs building. The §5 question is closed.
+- **Calendar:** required-params fix was right, and incomplete — Valence also rejects second-precision timestamps with the *same* 400 it gives for omitting them. Added `to_utc_param()` (milliseconds).
+- **Classlist under `le`:** right, and it turned "blocked" into 145 real users — which made the roster a live privacy exposure rather than a hypothetical one. `get_class_list` now withholds the student list by policy.
+- **`403` + HTML does not mean "session dead".** `courses/{id}` returns exactly that on a fully live session. `main`'s content-type heuristic was derived from the anonymous probe and is wrong once you are logged in; the client now resolves ambiguous 403s with a liveness probe.
+- **`mysubmissions` is 403** despite being a documented Learner route, and `list_assignments` was reporting every assignment as `not_submitted` on that silence.
+
+290 tests pass. The remaining ⚠️ is `discussions/`, which was empty in the probed course and so is still unexercised.

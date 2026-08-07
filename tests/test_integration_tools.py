@@ -594,11 +594,29 @@ class TestClassList:
         from avenue_mcp.tools.classlist import get_class_list
 
         out = await get_class_list(ctx, ORG)
+
+        # The roster is NEVER returned in bulk, in either world. The live probe
+        # found classlist works for students (145 people with names, emails,
+        # usernames), so "restricted" is not the case that protects this data --
+        # the tool has to.
+        assert out["students"] == []
+        assert out["student_roster_returned"] is False
+
         if ctx.restricted:
-            assert out["student_roster_available"] is False
             assert out["note"], "must explain why, not silently return nothing"
         else:
             assert any(i["role"] == "Instructor" for i in out["instructors"])
+            # Course staff still come back in full -- that's the tool's job.
+            assert out["instructors"][0].get("name")
+
+    async def test_withheld_roster_is_explained_not_silent(self, ctx):
+        """An empty students array must never read as 'no classmates found'."""
+        from avenue_mcp.tools.classlist import get_class_list
+
+        out = await get_class_list(ctx, ORG)
+        if out["student_count"]:
+            assert "not included" in (out["note"] or "").lower()
+            assert "fippa" in (out["note"] or "").lower()
 
 
 class TestWhatsNew:

@@ -1,12 +1,106 @@
 # 08 — API Probe Results
 
-> **STATUS: PARTIALLY RUN — the credential-free half is complete (2026-08-05).**
+> **STATUS: COMPLETE (2026-08-07).** Both halves have now been run against a
+> real McMaster student account on `avenue.cllmcmaster.ca`.
 >
-> Several probe questions turn out not to need a MacID at all, and those are
-> answered below with real data. Everything requiring a logged-in session is
-> still `TBD` and needs `avenue-mcp login` followed by `scripts/probe.py`.
->
-> Run `scripts/probe_unauth.py` to reproduce the credential-free findings.
+> - Credential-free half: `scripts/probe_unauth.py` (2026-08-05)
+> - Authenticated half: `avenue-mcp login` → `scripts/probe.py --course <id>` (2026-08-07)
+
+---
+
+## Authenticated probe — 2026-08-07
+
+Account: McMaster student, 21 active course offerings (74 enrollments total).
+Probe course: a 200-level SFWRENG offering with real assignments, grades, and announcements.
+
+**Pick a course with actual content.** The probe's default — first active enrollment — landed on a shared first-year MATH shell where `dropbox/folders/`, `grades/`, `quizzes/`, and `discussions/` all returned `[]`. Empty is not the same as permitted, and reading "OK" off that run would have been a false positive on four routes. Pass `--course` explicitly.
+
+### Auth: **cookies work.** `CookieSessionAuth` is the strategy.
+
+| Question | Answer |
+|---|---|
+| Cookies after login | **25**, including `d2lSessionVal` and `d2lSecureSessionVal` |
+| Other cookies | Entra/SAML (`ESTSAUTH*`, `esctx*`, `SimpleSAMLAuthToken`), affinity (`buid`, `uaid`, `x-ms-gateway-slice`) — carry the whole jar |
+| Cookie-only `GET users/whoami` | **200 + JSON.** No `Authorization` header needed. |
+| XSRF token obtainable | Yes |
+| **Verdict** | **`CookieSessionAuth`** — the browser is a login-only step, not a runtime dependency |
+
+This settles the open question in [`01-authentication.md`](01-authentication.md). Neither bearer fallback is needed; do not build them. Expect to re-login roughly daily, not hourly.
+
+### Route results
+
+| Route | Result | Notes |
+|---|---|---|
+| `users/whoami` | ✅ | |
+| `enrollments/myenrollments/` | ✅ | 74 entries, 21 active offerings |
+| **`courses/{id}`** | ⛔ **403** | Blocked even on a healthy session. Course names come from `myenrollments` instead. |
+| `content/root/`, module structure, topic metadata | ✅ | `LastModifiedDate` present → incremental sync works |
+| **`dropbox/folders/`** | ✅ | 4 folders with `DueDate`, `Assessment`, `CustomInstructions` |
+| `dropbox/folders/{id}` | ✅ | |
+| **`dropbox/.../mysubmissions/`** | ⛔ **403** | *Documented as a Learner route, and blocked anyway.* Submission status is unavailable. |
+| **`grades/values/myGradeValues/`** | ✅ | 18 items, with `WeightedNumerator`/`WeightedDenominator` |
+| **`grades/`** (structure) | ✅ | 17 objects, **weights present** |
+| `news/` | ✅ | 38 announcements |
+| `calendar/events/myEvents/` | ✅ | *See the parameter trap below.* Returned 0 events — this course puts nothing on the calendar. |
+| `quizzes/` | ✅ | 1 quiz with dates |
+| `quizzes/{id}/attempts/` | ⛔ 403 | Quiz *attempt* status unavailable; the quiz itself is readable |
+| `discussions/forums/` | ✅ | empty in this course |
+| **`classlist/`** | ✅ **works** | **145 users with names, emails, usernames, OrgDefinedIds** — see the privacy note below |
+| `enrollments/orgUnits/{id}/users/` | ⛔ 403 | |
+
+### Three traps this probe walked into
+
+**1. `classlist` is under `le`, not `lp`.** Under `lp` it returns `404`, which the tool recorded as "roster unavailable" — a permission conclusion drawn from a wrong path. Corrected, and the route then returned 145 users.
+
+**2. `calendar/events/myEvents/` needs milliseconds in its timestamps.** It requires `startDateTime`/`endDateTime`, and rejects the second-precision form with the *same* 400 it gives for omitting them entirely:
+
+```
+...T13:34:45Z      -> 400 Invalid Parameters
+...T13:34:45.000Z  -> 200
+```
+
+Use `util.dates.to_utc_param()` for outbound query params; `to_utc_iso()` is for rendering and storage.
+
+**3. `403` + `text/html` does NOT mean the session is dead.** The credential-free probe found anonymous requests return 403+HTML, so the client mapped that to `SessionExpiredError`. But `courses/{id}` returns **403 + `text/html` + body `Forbidden`** on a fully live session, while `whoami` returns 200 JSON on that same session. The old heuristic told the user to log in again against a wall that will never move — and because `SessionExpiredError` is an `AuthError` rather than an `APIError`, it also slipped past every `except PermissionDeniedError` degradation arm in `tools/`. The client now defers the 403 and resolves it with a liveness probe.
+
+### ⚠️ Privacy: the roster is available, and is deliberately withheld
+
+`docs/02` predicted `403` here and `docs/07` says a roster is FIPPA-protected personal information. The route **works**: one course returned 145 classmates with full names, McMaster email addresses, usernames, and student-facing IDs.
+
+Both implementations of `get_class_list` were written for the blocked case and would have passed that array straight back — meaning every call shipped a third of a lecture hall's personal information to whatever model provider the MCP client uses.
+
+`get_class_list` now returns course staff in full, `students: []`, and a `student_count`, with a note explaining the omission so an empty array is never read as "no classmates found". This is a deliberate policy choice, pinned by tests, and consistent with `docs/07`'s statement that the tool "is designed to return instructor contacts".
+
+### Field-shape findings (only visible with real data)
+
+**`classlist` reports roles in `ClasslistRoleDisplayName`.** Not `Role`, `RoleName`, `RoleDisplayName`, or `RoleAlias` — none of which are present. Observed: `Instructor` ×1, `TA 1` ×10, `Student` ×134 (`RoleId` 104/106/105). With that field missing from the lookup, every entry normalized to `Unknown`, all 145 landed in `students`, `instructors` came back empty — and the empty-instructors branch then fired the enrollments fallback, whose 403 overwrote the note with "the class list is not available" about a route that had just returned 145 rows. One missing key produced a wrong answer *and* a wrong explanation for it.
+
+**`classlist` leaves `Email` empty for staff.** Populated: `DisplayName`, `FirstName`, `LastName`, `Username`, `Identifier`, `ClasslistRoleDisplayName`, `RoleId`, `IsOnline`. Empty: `Email`, `OrgDefinedId`, `Pronouns`, `LastAccessed`. `Username` is present and McMaster addresses are conventionally `<macid>@mcmaster.ca`, but composing one would be a guess presented as a contact detail, so `get_class_list` reports the gap instead.
+
+**Submission status is not knowable on this instance.** `mysubmissions` 403s, and `list_assignments` defaulted every record to `not_submitted`, upgrading only on a successful read — so a blocked route silently became "you have not submitted this" for every assignment in the course. Now `unknown`, with `submission_status_available: false` and a note telling the model not to assert either way.
+
+**The gradebook's declared weights sum to 120%, not 100%.** `analyze_grade_summary` detects this and refuses to project — correct, since it means the course uses a rule the API does not expose (dropped lowest, bonus items, nested category weights). A readable route is not the same as sound arithmetic.
+
+### Feature viability
+
+| Feature | Viable? | Notes |
+|---|---|---|
+| List courses | ✅ | Names from `myenrollments`; `courses/{id}` is blocked |
+| Browse + read content | ✅ | |
+| Assignments | ✅ **full** | Due dates, points, instructions — **but no submission status** (`mysubmissions` 403) |
+| Deadlines | ✅ | From `dropbox/folders/`. The calendar was empty in this course, so it is not a reliable primary source here. |
+| Grades | ✅ | |
+| **Grade projection** | ✅ | Weights present — projection is computable |
+| Announcements | ✅ | |
+| Quizzes | ✅ dates only | Attempt status blocked |
+| Class roster | ⚠️ available, **withheld by policy** | |
+| RAG over content | ✅ | |
+
+---
+
+## Credential-free findings (2026-08-05)
+
+> Run `scripts/probe_unauth.py` to reproduce.
 
 ## ⚠️ Headline finding: the base URL in the original plan was wrong
 

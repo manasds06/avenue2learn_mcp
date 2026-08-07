@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import json
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,13 +43,21 @@ class Probe:
         self.save = save
         self.results: list[dict[str, Any]] = []
 
-    async def run(self, label: str, component: str, suffix: str, *, paged: bool = False) -> Any:
+    async def run(
+        self,
+        label: str,
+        component: str,
+        suffix: str,
+        *,
+        paged: bool = False,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
         entry: dict[str, Any] = {"label": label, "route": f"{component}/{suffix}"}
         try:
             if paged:
-                data = await self.ctx.client.get_paged(component, suffix, cache=False)  # type: ignore[arg-type]
+                data = await self.ctx.client.get_paged(component, suffix, params=params, cache=False)  # type: ignore[arg-type]
             else:
-                data = await self.ctx.client.get(component, suffix, cache=False)  # type: ignore[arg-type]
+                data = await self.ctx.client.get(component, suffix, params=params, cache=False)  # type: ignore[arg-type]
             entry["status"] = "OK"
             entry["shape"] = describe_shape(data)
             entry["count"] = len(data) if isinstance(data, list) else None
@@ -212,8 +221,20 @@ async def main() -> int:
     # --- news / calendar --------------------------------------------------
     print("\nC13-C14. ANNOUNCEMENTS + CALENDAR")
     await probe.run("news", "le", f"{org_unit_id}/news/", paged=True)
+    # startDateTime/endDateTime are REQUIRED here; without them Valence returns
+    # 400 and the probe would record a malformed request as a blocked route.
+    from avenue_mcp.util.dates import now_utc, to_utc_param
+
+    _now = now_utc()
     events = await probe.run(
-        "calendar_myevents", "le", f"{org_unit_id}/calendar/events/myEvents/", paged=True
+        "calendar_myevents",
+        "le",
+        f"{org_unit_id}/calendar/events/myEvents/",
+        paged=True,
+        params={
+            "startDateTime": to_utc_param(_now - timedelta(days=30)),
+            "endDateTime": to_utc_param(_now + timedelta(days=120)),
+        },
     )
     if isinstance(events, list):
         from avenue_mcp.tools.assignments import _classify
@@ -282,7 +303,10 @@ async def main() -> int:
 
     # --- classlist --------------------------------------------------------
     print("\nC15-C16. CLASS LIST  (403 expected and correct)")
-    await probe.run("classlist", "lp", f"{org_unit_id}/classlist/", paged=True)
+    # `le`, not `lp` -- the wrong component 404s, and a 404 recorded here would
+    # be transcribed into docs/08 as "roster blocked", which is a permission
+    # conclusion drawn from a typo.
+    await probe.run("classlist", "le", f"{org_unit_id}/classlist/", paged=True)
     await probe.run(
         "orgunit_users", "lp", f"enrollments/orgUnits/{org_unit_id}/users/", paged=True
     )

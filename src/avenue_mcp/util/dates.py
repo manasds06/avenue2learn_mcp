@@ -50,6 +50,24 @@ def to_utc_iso(dt: datetime | None) -> str | None:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def to_utc_param(dt: datetime | None) -> str | None:
+    """Format a UTCDateTime for a Valence *query parameter*.
+
+    Differs from to_utc_iso by the milliseconds, and that is not cosmetic:
+    calendar/events/myEvents/ rejects the second-precision form with
+
+        400 Invalid Parameters -- "Request has missing or invalid parameters."
+
+    which is the same error it gives for omitting the parameter entirely.
+    Measured against avenue.cllmcmaster.ca (le 1.96): `...T00:00:00Z` fails,
+    `...T00:00:00.000Z` succeeds. Use this for outbound query params and
+    to_utc_iso for anything we render or store.
+    """
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 def _zone(tz_name: str) -> ZoneInfo:
     """Resolve a timezone, with an actionable message when tz data is absent.
 

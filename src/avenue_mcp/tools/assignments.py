@@ -22,6 +22,7 @@ from avenue_mcp.util.dates import (
     now_utc,
     parse_d2l,
     to_utc_iso,
+    to_utc_param,
     within_window,
 )
 from avenue_mcp.util.html import to_text, truncate
@@ -80,6 +81,7 @@ async def list_assignments(
         }
 
     assignments: list[dict[str, Any]] = []
+    status_unavailable = False
     for folder in folders:
         if not isinstance(folder, dict):
             continue
@@ -108,7 +110,14 @@ async def list_assignments(
         }
 
         sub = await _my_submission(ctx, org_unit_id, folder_id)
-        if sub is not None:
+        if isinstance(sub, _Unavailable):
+            # Do NOT leave this at "not_submitted". Avenue refused to tell us,
+            # and reporting "you haven't submitted A3" to someone who has is a
+            # confidently wrong answer about a deadline -- the single most
+            # damaging thing this tool could say.
+            record["submission_status"] = "unknown"
+            status_unavailable = True
+        elif sub is not None:
             record["submission_status"] = "submitted"
             record["submitted_at"] = describe(sub["submitted_at"], tz)
             record["submitted_files"] = sub["files"]
@@ -122,19 +131,44 @@ async def list_assignments(
 
     assignments.sort(key=lambda a: (a["due_date"]["utc"] or "9999", a["name"] or ""))
 
-    return {
+    out: dict[str, Any] = {
         "org_unit_id": org_unit_id,
         "course_name": await ctx.course_name(org_unit_id),
         "assignments": assignments,
         "count": len(assignments),
         "degraded": False,
+        "submission_status_available": not status_unavailable,
     }
+    if status_unavailable:
+        out["note"] = (
+            "Submission status is not available on this Avenue instance -- the "
+            "learner submissions route is denied to student accounts, so every "
+            "assignment shows submission_status 'unknown'. Do not tell the user "
+            "they have or have not submitted anything; point them at Avenue to "
+            "check. Due dates, points, and instructions above are accurate."
+        )
+    return out
+
+
+class _Unavailable:
+    """Sentinel: the submissions route could not be read.
+
+    Distinct from None-meaning-nothing-submitted, because conflating them makes
+    the tool assert "you have not submitted this" on no evidence.
+    """
+
+
+UNAVAILABLE = _Unavailable()
 
 
 async def _my_submission(
     ctx: AppContext, org_unit_id: int, folder_id: int
-) -> dict[str, Any] | None:
-    """The `mysubmissions` naming is the tell: D2L built this one for students."""
+) -> dict[str, Any] | _Unavailable | None:
+    """The `mysubmissions` naming suggests D2L built this one for students.
+
+    It is nonetheless **403 on avenue.cllmcmaster.ca** (measured 2026-08-07,
+    docs/08), so on this instance submission status is simply not knowable.
+    """
     try:
         data = await ctx.client.get(
             "le",
@@ -146,7 +180,7 @@ async def _my_submission(
         )
     except APIError as exc:
         log.debug("mysubmissions unavailable for folder %s: %s", folder_id, exc)
-        return None
+        return UNAVAILABLE
 
     entries = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
     latest: dict[str, Any] | None = None
@@ -429,8 +463,8 @@ async def _calendar_events(
     """
     now = now_utc()
     window = {
-        "startDateTime": to_utc_iso(now - timedelta(days=days_back)),
-        "endDateTime": to_utc_iso(now + timedelta(days=days_ahead)),
+        "startDateTime": to_utc_param(now - timedelta(days=days_back)),
+        "endDateTime": to_utc_param(now + timedelta(days=days_ahead)),
     }
     data = await ctx.client.get_paged(
         "le", f"{org_unit_id}/calendar/events/myEvents/", params=window

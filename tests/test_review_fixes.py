@@ -91,7 +91,13 @@ class TestStreamingErrorMapping:
         if hasattr(resp, "_content"):
             del resp._content
 
-        with pytest.raises(SessionExpiredError):
+        # The point of this test is that building the message must not touch an
+        # unread streaming body. 403+HTML now defers to _resolve_403, so the
+        # marker is what escapes here -- but it must be a typed raise, never
+        # httpx.ResponseNotRead.
+        from avenue_mcp.client.d2l import _Ambiguous403
+
+        with pytest.raises((SessionExpiredError, _Ambiguous403)):
             D2LClient._raise_for_status(resp, "/d2l/api/le/1.0/1/file")
 
 
