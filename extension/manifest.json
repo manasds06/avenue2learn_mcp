@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Avenue Assistant",
+  "version": "0.1.0",
+  "description": "Ask about your McMaster Avenue to Learn courses — deadlines, grades, announcements — answered from your real course data.",
+
+  "permissions": [
+    "storage",
+    "sidePanel"
+  ],
+
+  "host_permissions": [
+    "https://avenue.cllmcmaster.ca/*",
+    "https://generativelanguage.googleapis.com/*"
+  ],
+
+  "background": {
+    "service_worker": "background/worker.js",
+    "type": "module"
+  },
+
+  "side_panel": {
+    "default_path": "ui/sidepanel.html"
+  },
+
+  "action": {
+    "default_title": "Avenue Assistant"
+  },
+
+  "minimum_chrome_version": "116"
+}

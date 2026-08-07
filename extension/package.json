@@ -1,0 +1,20 @@
+{
+  "name": "avenue-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome extension client for Avenue to Learn, with LLM tool calling",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.270",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

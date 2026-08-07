@@ -1,0 +1,65 @@
+:root {
+  color-scheme: light dark;
+  --fg: #1a1a1a;
+  --muted: #666;
+  --bg: #fff;
+  --line: #e3e3e3;
+  --accent: #7a003c; /* McMaster maroon */
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #ededed;
+    --muted: #a0a0a0;
+    --bg: #1c1c1c;
+    --line: #333;
+    --accent: #d4738f;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 16px;
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+h1 { font-size: 15px; margin: 0; }
+.sub { margin: 4px 0 16px; color: var(--muted); font-size: 12px; }
+
+button {
+  width: 100%;
+  padding: 10px 14px;
+  font: inherit;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.6; cursor: default; }
+
+#status {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+#status:empty { display: none; }
+#status.ok { border-color: #2e7d32; }
+#status.err { border-color: #c62828; }
+
+pre {
+  margin: 0;
+  padding: 10px;
+  overflow-x: auto;
+  font-size: 12px;
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  border-radius: 6px;
+}
+pre:empty { display: none; }

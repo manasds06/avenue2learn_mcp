@@ -35,3 +35,7 @@ htmlcov/
 .idea/
 .DS_Store
 Thumbs.db
+
+# --- Extension build artifacts -----------------------------------------
+extension/node_modules/
+extension/dist/
