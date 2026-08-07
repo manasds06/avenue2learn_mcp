@@ -7,11 +7,25 @@ variables are the only configuration channel that reliably exists.
 from __future__ import annotations
 
 import json
+import logging
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from avenue_mcp.errors import ConfigError
+from avenue_mcp.institutions import (
+    DEFAULT_INSTITUTION,
+    INSTITUTIONS,
+    Institution,
+    custom_institution,
+    get_institution,
+)
+
+log = logging.getLogger(__name__)
+
+_DEFAULT_PROFILE = INSTITUTIONS[DEFAULT_INSTITUTION]
 
 
 class Settings(BaseSettings):
@@ -22,16 +36,17 @@ class Settings(BaseSettings):
     )
 
     # --- Instance ---------------------------------------------------------
-    # IMPORTANT: avenue.mcmaster.ca is a static Apache landing page, NOT the
-    # Brightspace application -- every /d2l/* path 404s there. The real
-    # Brightspace host is avenue.cllmcmaster.ca, confirmed by
-    # GET /d2l/api/versions/ returning live Valence JSON (lp 1.62, le 1.96).
-    #
-    # Login STARTS on the landing page (login.php -> Microsoft SAML) and lands
-    # on the Brightspace host, so the two are configured separately.
-    base_url: str = "https://avenue.cllmcmaster.ca"
-    login_url: str = "https://avenue.mcmaster.ca/login.php"
-    timezone: str = "America/Toronto"
+    # Which school's Brightspace this process talks to. One process serves one
+    # institution; two schools means two MCP server entries with two env blocks.
+    # See avenue_mcp/institutions.py for the registry.
+    institution: str = DEFAULT_INSTITUTION
+
+    # These default to the profile's values, but an explicit env override always
+    # wins -- that is what lets an unlisted school work with no code change.
+    # Resolved in _resolve_institution below.
+    base_url: str = _DEFAULT_PROFILE.base_url
+    login_url: str = _DEFAULT_PROFILE.login_url
+    timezone: str = _DEFAULT_PROFILE.timezone
 
     # --- State ------------------------------------------------------------
     state_dir: Path = Field(default_factory=lambda: Path.home() / ".avenue-mcp")
@@ -71,6 +86,8 @@ class Settings(BaseSettings):
     # --- Logging ----------------------------------------------------------
     log_level: str = "INFO"
 
+    _profile: Institution = PrivateAttr()
+
     @field_validator("base_url")
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
@@ -83,18 +100,67 @@ class Settings(BaseSettings):
             return Path(v).expanduser()
         return v
 
+    @model_validator(mode="after")
+    def _resolve_institution(self) -> Settings:
+        """Fill base_url/login_url/timezone from the profile, unless overridden.
+
+        Precedence: explicit env/kwarg > selected profile > mcmaster.
+        """
+        try:
+            profile = get_institution(self.institution)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from None
+
+        provided = self.model_fields_set
+        for name in ("base_url", "login_url", "timezone"):
+            if name not in provided:
+                # Bypass __setattr__ validation; field_validator does not re-run
+                # on assignment here, so normalize explicitly where it matters.
+                object.__setattr__(self, name, getattr(profile, name))
+
+        # An explicit base_url pointing somewhere the profile does not describe
+        # means we are talking to a school we know nothing about. Inheriting the
+        # selected profile's name -- let alone its measured capabilities -- would
+        # be exactly the lie the capability system exists to prevent.
+        if "base_url" in provided and self.base_url.rstrip("/") != profile.base_url:
+            profile = custom_institution(self.base_url, self.timezone)
+
+        object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
+        self._profile = profile
+        return self
+
+    # --- Institution ------------------------------------------------------
+    @property
+    def institution_profile(self) -> Institution:
+        return self._profile
+
+    @property
+    def state_namespace(self) -> str:
+        return self._profile.id
+
     # --- Derived paths ----------------------------------------------------
     @property
+    def institution_dir(self) -> Path:
+        """Per-institution state root.
+
+        Namespaced because org_unit_ids are per-instance and WILL collide across
+        schools -- a shared index would silently overwrite one school's course
+        with another's -- and because a shared session.json means logging into
+        one school destroys the other's session.
+        """
+        return self.state_dir / self.state_namespace
+
+    @property
     def session_path(self) -> Path:
-        return self.state_dir / "session.json"
+        return self.institution_dir / "session.json"
 
     @property
     def index_path(self) -> Path:
-        return self.state_dir / "index.db"
+        return self.institution_dir / "index.db"
 
     @property
     def cache_dir(self) -> Path:
-        return self.state_dir / "cache"
+        return self.institution_dir / "cache"
 
     @property
     def render_dir(self) -> Path:
@@ -102,21 +168,64 @@ class Settings(BaseSettings):
 
     @property
     def log_dir(self) -> Path:
-        return self.state_dir / "logs"
+        return self.institution_dir / "logs"
 
     @property
     def writes_log_path(self) -> Path:
         return self.log_dir / "writes.log"
 
     def ensure_dirs(self) -> None:
-        for p in (self.state_dir, self.cache_dir, self.render_dir, self.log_dir):
+        self._adopt_legacy_state()
+        for p in (
+            self.state_dir,
+            self.institution_dir,
+            self.cache_dir,
+            self.render_dir,
+            self.log_dir,
+        ):
             p.mkdir(parents=True, exist_ok=True)
-        # The state dir holds a credential; keep it owner-only where the
-        # platform supports it.
+        # These dirs hold a credential; keep them owner-only where the platform
+        # supports it. institution_dir matters most -- it directly contains
+        # session.json.
+        for p in (self.state_dir, self.institution_dir):
+            try:
+                p.chmod(0o700)
+            except (OSError, NotImplementedError):
+                pass
+
+    def _adopt_legacy_state(self) -> None:
+        """Move pre-namespacing flat state into the institution subdirectory.
+
+        State used to live directly under state_dir. That layout was
+        unambiguously McMaster's, so it is only ever adopted into mcmaster/ --
+        never into another school's namespace.
+
+        Moves rather than copies: a copied session.json leaves a second live
+        credential at a path nothing will subsequently chmod or ACL. Failure is
+        non-fatal -- housekeeping must never take down a login.
+        """
+        if self.state_namespace != DEFAULT_INSTITUTION:
+            return
+        if self.institution_dir.exists():
+            return
+        legacy = [
+            (self.state_dir / name, self.institution_dir / name)
+            for name in ("session.json", "index.db", "cache", "logs")
+        ]
+        if not any(src.exists() for src, _ in legacy):
+            return
         try:
-            self.state_dir.chmod(0o700)
-        except (OSError, NotImplementedError):
-            pass
+            self.institution_dir.mkdir(parents=True, exist_ok=True)
+            for src, dst in legacy:
+                if src.exists() and not dst.exists():
+                    src.replace(dst)
+        except OSError:
+            log.warning(
+                "Could not migrate existing state into %s. The old files are "
+                "still in %s; you may need to run `avenue-mcp login` again.",
+                self.institution_dir,
+                self.state_dir,
+            )
 
     def load_grade_scale(self) -> dict[str, float] | None:
         """Letter-grade cutoffs, or None if not configured."""

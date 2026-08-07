@@ -310,7 +310,7 @@ class D2LClient:
                 # caught earlier as an expired session.)
                 if url.startswith("/d2l/api/"):
                     raise UpstreamError(
-                        f"Avenue returned a non-JSON body for {url}."
+                        f"Brightspace returned a non-JSON body for {url}."
                     ) from exc
                 return resp.text
 
@@ -335,13 +335,13 @@ class D2LClient:
             api_host = urlparse(str(resp.request.url)).netloc.lower()
             if not loc or (host and host != api_host) or "login" in loc.lower():
                 raise SessionExpiredError(
-                    f"Avenue redirected {url} to sign-in; the session has expired."
+                    f"Brightspace redirected {url} to sign-in; the session has expired."
                 )
         if resp.status_code == 200 and url.startswith("/d2l/api/"):
             ctype = resp.headers.get("content-type", "").lower()
             if "text/html" in ctype:
                 raise SessionExpiredError(
-                    f"Avenue returned a login page for {url}; the session has expired."
+                    f"Brightspace returned a login page for {url}; the session has expired."
                 )
 
     async def _resolve_403(self, exc: "_Ambiguous403") -> None:
@@ -361,10 +361,10 @@ class D2LClient:
         if self._session_alive:
             raise PermissionDeniedError(
                 f"Access denied for {exc.url}. Your account cannot read this on "
-                f"Avenue -- it is likely instructor-only. {exc.detail}".strip()
+                f"Brightspace -- it is likely instructor-only. {exc.detail}".strip()
             )
         raise SessionExpiredError(
-            f"Avenue returned its sign-in wall for {exc.url}; the session is not valid."
+            f"Brightspace returned its sign-in wall for {exc.url}; the session is not valid."
         )
 
     @staticmethod
@@ -423,7 +423,7 @@ class D2LClient:
             raise InvalidRequestError(f"Request too large for {url}.")
         if code == 429:
             raise _RateLimited(resp)
-        raise UpstreamError(f"Avenue returned {code} for {url}. {detail}".strip())
+        raise UpstreamError(f"Brightspace returned {code} for {url}. {detail}".strip())
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -433,7 +433,7 @@ class _RateLimited(UpstreamError):
     """Internal: carries Retry-After so backoff can honor it."""
 
     def __init__(self, resp: httpx.Response) -> None:
-        super().__init__("Rate limited by Avenue.")
+        super().__init__("Rate limited by Brightspace.")
         self.retry_after = resp.headers.get("retry-after")
 
 

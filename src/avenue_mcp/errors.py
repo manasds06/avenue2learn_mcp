@@ -38,16 +38,16 @@ class AuthError(AvenueMCPError):
 
 
 class NoSessionError(AuthError):
-    """Not logged in to Avenue."""
+    """Not logged in to Brightspace."""
 
     hint = (
-        "Run `avenue-mcp login` in a terminal, complete MacID sign-in "
+        "Run `avenue-mcp login` in a terminal, complete your university sign-in "
         "(including 2FA), then retry."
     )
 
 
 class SessionExpiredError(AuthError):
-    """The Avenue session expired."""
+    """The Brightspace session expired."""
 
     hint = "Run `avenue-mcp login` to sign in again, then retry."
 
@@ -55,7 +55,7 @@ class SessionExpiredError(AuthError):
 class LoginTimeoutError(AuthError):
     """Login did not complete before the window closed."""
 
-    hint = "Run `avenue-mcp login` again and complete MacID + 2FA."
+    hint = "Run `avenue-mcp login` again and complete sign-in, including 2FA if prompted."
 
 
 # --- API ------------------------------------------------------------------
@@ -70,7 +70,7 @@ class PermissionDeniedError(APIError):
 
     # Deliberately does NOT suggest re-login: the session is fine.
     hint = (
-        "Your Avenue account doesn't have access to this -- it may be "
+        "Your Brightspace account doesn't have access to this -- it may be "
         "instructor-only. This is not a login problem, so signing in again "
         "will not help."
     )
@@ -89,9 +89,9 @@ class InvalidRequestError(APIError):
 
 
 class UpstreamError(APIError):
-    """Avenue returned a server error after retries."""
+    """Brightspace returned a server error after retries."""
 
-    hint = "Avenue may be having trouble. Wait a minute and retry."
+    hint = "Brightspace may be having trouble. Wait a minute and retry."
 
 
 # --- RAG ------------------------------------------------------------------

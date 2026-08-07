@@ -22,6 +22,15 @@ def _isolate_state(tmp_path, monkeypatch):
     monkeypatch.delenv("AVENUE_MCP_ENABLE_WRITES", raising=False)
     monkeypatch.setenv("AVENUE_MCP_KEEPALIVE_MINUTES", "0")
 
+    # Pin the institution explicitly rather than deleting the var. Settings'
+    # `_env_file=None` disables dotenv, NOT os.environ, so a developer with
+    # AVENUE_MCP_INSTITUTION exported in their shell would otherwise run the
+    # whole suite against the wrong profile -- silently, apart from the URL
+    # assertions in test_live_findings.py.
+    monkeypatch.setenv("AVENUE_MCP_INSTITUTION", "mcmaster")
+    for var in ("AVENUE_MCP_BASE_URL", "AVENUE_MCP_LOGIN_URL", "AVENUE_MCP_TIMEZONE"):
+        monkeypatch.delenv(var, raising=False)
+
     from avenue_mcp.config import get_settings
 
     get_settings.cache_clear()

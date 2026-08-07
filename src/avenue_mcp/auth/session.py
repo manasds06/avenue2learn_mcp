@@ -68,7 +68,7 @@ class CookieSessionAuth:
         if self._state is not None:
             return self._state
         if not self.session_present:
-            raise NoSessionError("No saved Avenue session.")
+            raise NoSessionError("No saved Brightspace session.")
         try:
             raw = json.loads(self.session_path.read_text("utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -202,9 +202,9 @@ class CookieSessionAuth:
         call.
         """
         if not self.session_present:
-            raise NoSessionError("Not logged in to Avenue.")
+            raise NoSessionError("Not logged in to Brightspace.")
         if not await self.is_alive():
-            raise SessionExpiredError("The Avenue session is no longer valid.")
+            raise SessionExpiredError("The Brightspace session is no longer valid.")
 
     async def aclose(self) -> None:
         if self._client is not None and not self._client.is_closed:
@@ -250,7 +250,7 @@ class OAuthAuth:
     this class gets written, config selects it, and the tool layer is untouched.
 
     Note what does NOT work: registering your own Microsoft Entra app and
-    exchanging a MacID token for Avenue access. Entra tokens are scoped to the
+    exchanging a MacID token for Brightspace access. Entra tokens are scoped to the
     app that requested them; Brightspace has no trust relationship with your
     registration and no endpoint that exchanges a third-party IdP token for a
     Brightspace session. See docs/01-authentication.md.

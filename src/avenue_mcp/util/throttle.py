@@ -4,7 +4,7 @@ An unsanctioned integration that generates abnormal load is the one that gets
 noticed and blocked. Throttling here is a requirement, not an optimization.
 
 The throttle is global rather than per-tool: the constraint is "requests we
-send to Avenue", and a per-tool limiter lets a fan-out tool blow past it.
+send to Brightspace", and a per-tool limiter lets a fan-out tool blow past it.
 """
 
 from __future__ import annotations

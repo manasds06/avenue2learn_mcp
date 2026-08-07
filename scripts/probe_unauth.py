@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -124,10 +125,20 @@ async def main() -> int:
             print(f"    {h.status_code} {h.url}")
         host = r.url.host
         print(f"  final host: {host}")
-        if "microsoft" in host or "login" in host:
-            print("  -> SSO is external (Microsoft Entra), as expected")
-        elif host.endswith("mcmaster.ca"):
-            print("  -> stays on a McMaster host")
+        # Driven off the configured host rather than hardcoded institution
+        # names. The old version tested for "microsoft" or a mcmaster.ca suffix
+        # and printed NOTHING for any other school -- Carleton's IdP is
+        # cufed.carleton.ca, which matched neither branch.
+        brightspace_host = urlparse(BASE).netloc
+        if host == brightspace_host:
+            print(f"  -> stayed on the Brightspace host ({brightspace_host});")
+            print("     anonymous API calls are answered directly, not bounced to SSO")
+        else:
+            print(f"  -> redirected off {brightspace_host} to an external IdP")
+            if "microsoft" in host or "login.microsoftonline" in host:
+                print("     IdP looks like Microsoft Entra")
+            elif "adfs" in str(r.url.path).lower() or host.startswith(("fed", "sts", "cufed")):
+                print("     IdP looks like ADFS")
 
     print("\n=== B6: does a default (non-browser) User-Agent behave differently? ===")
     async with httpx.AsyncClient(

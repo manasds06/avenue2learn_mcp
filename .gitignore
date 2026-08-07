@@ -14,6 +14,12 @@ vectors.npy
 # Probe output may contain PII / real IDs
 tests/fixtures/
 docs/probe-raw/
+# `probe.py --out FILE` defaults to wherever you run it, i.e. the repo root. Its
+# summary is redacted (field names and types, never values) but it still records
+# real org_unit_ids and route inventories, so it does not belong in git. Write-ups
+# go in docs/NN-*-probe-results.md by hand instead.
+*probe*.json
+probe-*.json
 
 # ---- Python ----
 __pycache__/

@@ -37,6 +37,7 @@ def cmd_login(args: argparse.Namespace) -> int:
 
     settings = get_settings()
     settings.ensure_dirs()
+    profile = settings.institution_profile
     try:
         interactive_login(
             settings.base_url,
@@ -44,17 +45,19 @@ def cmd_login(args: argparse.Namespace) -> int:
             timeout_seconds=args.timeout,
             headless=False,
             login_url=settings.login_url,
+            credential_brand=profile.credential_brand,
+            lms_name=profile.lms_name,
         )
     except LoginTimeoutError as exc:
         print(f"\nLogin failed: {exc}", file=sys.stderr)
-        print("Run `avenue-mcp login` again and complete MacID + 2FA.", file=sys.stderr)
+        print("Run `avenue-mcp login` again and complete sign-in, including 2FA if prompted.", file=sys.stderr)
         return 1
     except RuntimeError as exc:
         print(f"\n{exc}", file=sys.stderr)
         return 1
 
     print(
-        "\nThis session file is equivalent to a logged-in Avenue session.\n"
+        "\nThis session file is equivalent to a logged-in Brightspace session.\n"
         "Do not commit, sync, or share it."
     )
     return 0
@@ -78,6 +81,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     session = result["session"]
     index = result["index"]
+    inst = result["institution"]
+    print(f"Institution:   {inst['display']}")
     print(f"Instance:      {result['config']['base_url']}")
     print(f"Session:       present={session['present']} alive={session['alive']}", end="")
     if session.get("age_minutes") is not None:
@@ -106,7 +111,7 @@ def cmd_logout(_: argparse.Namespace) -> int:
     else:
         print("No saved session.")
     print("Note: this only deletes the local copy. To invalidate the session on")
-    print("Avenue's side, sign out in your browser.")
+    print("Brightspace's side, sign out in your browser.")
     return 0
 
 
@@ -134,16 +139,20 @@ def cmd_reindex(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    settings = get_settings()
+    profile = settings.institution_profile
     parser = argparse.ArgumentParser(
         prog="avenue-mcp",
-        description="MCP server for McMaster's Avenue to Learn (D2L Brightspace).",
+        description=f"MCP server for {profile.display} (D2L Brightspace).",
     )
     sub = parser.add_subparsers(dest="command")
 
     p_serve = sub.add_parser("serve", help="Run the MCP server over stdio")
     p_serve.set_defaults(func=cmd_serve)
 
-    p_login = sub.add_parser("login", help="Sign in to Avenue in a real browser")
+    p_login = sub.add_parser(
+        "login", help=f"Sign in to {profile.lms_name} in a real browser"
+    )
     p_login.add_argument(
         "--timeout", type=int, default=300, help="Seconds to wait for sign-in"
     )
