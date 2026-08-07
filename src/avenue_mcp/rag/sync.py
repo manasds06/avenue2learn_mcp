@@ -8,6 +8,7 @@ does not cost you the other 41 files.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -207,7 +208,59 @@ class Syncer:
         unique: dict[int, dict[str, Any]] = {}
         for t in found:
             unique.setdefault(t["topic_id"], t)
+        await self._resolve_missing_filenames(org_unit_id, unique)
         return list(unique.values())
+
+    async def _resolve_missing_filenames(
+        self, org_unit_id: int, topics: dict[int, dict[str, Any]]
+    ) -> None:
+        """Back-fill file names from each topic's detail record when needed.
+
+        Some instances omit `Url` from the module *structure* listing while
+        returning it from `content/topics/{id}`. Without it, guess_filename falls
+        back to the display title -- which carries no extension -- so
+        `extractor.is_supported()` rejects every file and a course with real PDFs
+        reports "48 found, 0 indexed, 48 unsupported". Measured on Carleton
+        (docs/09); McMaster's listing includes Url, which is why this went
+        unnoticed.
+
+        Only topics whose name has no usable extension are fetched, so an
+        instance that already returns Url costs nothing.
+        """
+        pending = [
+            (tid, t)
+            for tid, t in topics.items()
+            if not extractor.is_supported(t.get("file_name") or "")
+        ]
+        if not pending:
+            return
+
+        async def resolve(topic_id: int, topic: dict[str, Any]) -> None:
+            try:
+                detail = await self.client.get(
+                    "le", f"{org_unit_id}/content/topics/{topic_id}"
+                )
+            except APIError as exc:
+                log.debug("topic %s detail unreadable: %s", topic_id, exc)
+                return
+            if not isinstance(detail, dict):
+                return
+            # An absolute Url is an external link (a publisher site, a syllabus
+            # service), not a file hosted in Brightspace. Downloading it would
+            # fetch someone else's HTML, so leave it unsupported.
+            url = m.pick(detail, "Url", "Location")
+            if isinstance(url, str) and url.lower().startswith(("http://", "https://")):
+                return
+            name = m.guess_filename(detail)
+            if name and extractor.is_supported(name):
+                topic["file_name"] = name
+                topic["mime_type"] = m.mime_from_name(name)
+            if topic.get("last_modified") is None:
+                topic["last_modified"] = m.pick(
+                    detail, "LastModifiedDate", "LastModified"
+                )
+
+        await asyncio.gather(*(resolve(tid, t) for tid, t in pending))
 
     async def _index_file(
         self,

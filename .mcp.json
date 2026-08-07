@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "avenue": {
+      "command": "C:\\avenue2learn_mcp\\.venv\\Scripts\\avenue-mcp.exe",
+      "args": ["serve"],
+      "env": {
+        "AVENUE_MCP_INSTITUTION": "carleton"
+      }
+    }
+  }
+}

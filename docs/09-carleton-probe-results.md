@@ -47,6 +47,35 @@ status was available and returned nothing.
 **Consequence for probing any future school:** `mysubmissions` must be checked across
 multiple folders. Sampling one is how you record a permission you have not measured.
 
+## Second finding: the content listing omits `Url`, and that silently killed indexing
+
+`sync_course_materials` initially reported **every file unsupported** — found them all,
+indexed none, and finished in three seconds without downloading anything.
+
+The cause is a response-shape difference, not a permission. `discover_files` walks
+`content/root/` and `content/modules/{id}/structure/`, and on Carleton those listings return
+topics **without a `Url` field**. `guess_filename` therefore falls back to the display title,
+which carries no extension, so `is_supported()` rejects all of them. The real filename is
+available — `content/topics/{id}` returns `Url: /content/enforced/.../<name>.pdf` — just not
+in the listing McMaster supplies it in.
+
+**Fix:** back-fill from the topic detail record for any topic whose name lacks a usable
+extension ([`rag/sync.py`](../src/avenue_mcp/rag/sync.py), `_resolve_missing_filenames`).
+Instances that already include `Url` in the listing issue no extra requests, so McMaster pays
+nothing for Carleton's shape. Topics whose detail `Url` is **absolute** are left unsupported
+on purpose: those are external links to publisher or syllabus sites, and following one would
+download somebody else's HTML into the course index.
+
+After the fix, on the same course: **36 of 48 files indexed, 723 chunks**, and semantic search
+returns correct passages cited to file and page. The remaining 12 are genuinely not
+extractable — external links, plus one image-only PDF that yields no text and is reported as
+such rather than indexed empty.
+
+**Why the test suite missed it:** the mock Brightspace in `test_integration_tools.py` includes
+`Url` in its content listing, i.e. it is McMaster-shaped. Two instances is the minimum needed
+to notice that a field's presence was an assumption. Regression coverage for the
+`Url`-less shape is now in `tests/test_sync_filename_resolution.py`.
+
 ## Authentication
 
 The login flow needed **no changes**. `auth/login.py` codes no form selectors, so Carleton's
@@ -79,9 +108,11 @@ Field names are listed where the response shape matters. No values are recorded.
 | `users/whoami` | ✅ | `{FirstName, Identifier, LastName, ProfileIdentifier, Pronouns, UniqueName}` |
 | `enrollments/myenrollments/` | ✅ | Non-empty; paging works |
 | **`courses/{id}`** | ⛔ **403** | Blocked, same as McMaster. Course names come from `myenrollments`. |
-| `content/root/` | ✅ | Non-empty module tree |
-| `content/topics/{id}` | ✅ | `LastModifiedDate` present → incremental sync viable |
-| *(file discovery)* | ✅ | Downloadable topics found |
+| `content/root/` | ✅ | Non-empty module tree, but **no `Url` on topics** — see second finding |
+| `content/modules/{id}/structure/` | ✅ | Same omission |
+| `content/topics/{id}` | ✅ | Carries `Url` **and** `LastModifiedDate` → incremental sync viable |
+| `content/topics/{id}/file` | ✅ | Downloads work; files land under the per-institution cache dir |
+| *(file discovery)* | ✅ | Most topics indexable once `Url` is back-filled |
 | **`dropbox/folders/`** | ✅ | Non-empty, with `DueDate`, `Assessment`, `CustomInstructions` |
 | `dropbox/folders/{id}` | ✅ | |
 | **`dropbox/.../mysubmissions/`** | ⛔ **403** | Same as McMaster. Denied on every real assignment folder; see the headline finding. Submission status is not knowable. |
@@ -143,6 +174,7 @@ that is still a prediction until someone probes one.
 | Quizzes | ✅ list and dates; attempt status blocked |
 | Discussions corpus | ⬜ unverified — needs a course with actual topics |
 | Class roster | Available but withheld by design (FIPPA) |
+| **File search (RAG)** | ✅ verified end to end — download, extract, embed, cite. Required the `Url` back-fill above. |
 
 ---
 
