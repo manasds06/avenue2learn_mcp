@@ -25,7 +25,9 @@ Probe course: a 200-level SFWRENG offering with real assignments, grades, and an
 | XSRF token obtainable | Yes |
 | **Verdict** | **`CookieSessionAuth`** — the browser is a login-only step, not a runtime dependency |
 
-This settles the open question in [`01-authentication.md`](01-authentication.md). Neither bearer fallback is needed; do not build them. Expect to re-login roughly daily, not hourly.
+This settles the open question in [`01-authentication.md`](01-authentication.md). Neither bearer fallback is needed; do not build them.
+
+Note the cadence is set by the *session* lifetime, not the strategy: cookies mean no browser at runtime, but the session itself dies in about 6.8 h — see below. Roughly twice a working day, not once.
 
 ### Route results
 
