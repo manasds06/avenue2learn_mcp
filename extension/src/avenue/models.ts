@@ -98,3 +98,41 @@ export function truncate(text: string, cap: number): { text: string; truncated: 
   if (text.length <= cap) return { text, truncated: false };
   return { text: text.slice(0, cap), truncated: true };
 }
+
+export interface Link {
+  text: string;
+  url: string;
+}
+
+/**
+ * Pull anchors out of an HTML body.
+ *
+ * Kept separate from the text so neither is lost: dumping raw markup wastes
+ * context, but stripping links loses the Zoom link or the reading the user
+ * actually needs. Relative hrefs are resolved against Avenue.
+ */
+export function extractLinks(html: string, baseUrl: string): Link[] {
+  if (!html) return [];
+  const out: Link[] = [];
+  const seen = new Set<string>();
+  const re = /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+
+  for (const match of html.matchAll(re)) {
+    const href = (match[1] ?? "").trim();
+    if (!href || href.startsWith("javascript:") || href.startsWith("#")) continue;
+    let url: string;
+    try {
+      url = new URL(href, baseUrl).toString();
+    } catch {
+      continue;
+    }
+    if (seen.has(url)) continue;
+    seen.add(url);
+    out.push({ text: toText(match[2] ?? "") || url, url });
+  }
+  return out;
+}
+
+export function toTextAndLinks(html: string, baseUrl: string): { text: string; links: Link[] } {
+  return { text: toText(html), links: extractLinks(html, baseUrl) };
+}

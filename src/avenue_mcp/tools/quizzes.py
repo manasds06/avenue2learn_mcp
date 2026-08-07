@@ -64,12 +64,27 @@ async def list_quizzes(
             "days_until_due": days_until(due, now),
             "attempts_allowed": attempts_allowed,
             "attempts_used": attempts_used,
-            "status": "attempted" if (attempts_used or 0) > 0 else "not_attempted",
+            # `None` means the attempts route was denied (403 on this instance,
+            # docs/08) -- NOT that there are zero attempts. `(None or 0) > 0`
+            # quietly collapsed those, so every quiz reported "not_attempted"
+            # to a student who may well have taken it. Same failure as
+            # list_assignments defaulting to "not_submitted"; telling someone
+            # they haven't done the lab safety quiz when they have is the kind
+            # of confidently wrong answer this project exists to avoid.
+            "status": (
+                "unknown"
+                if attempts_used is None
+                else "attempted"
+                if attempts_used > 0
+                else "not_attempted"
+            ),
             "is_available_now": open_now,
             "is_past_due_but_open": past_due_open,
             "is_closed": bool(end and now > end),
             "best_score": best,
         }
+        # Only filter on a status we actually know. Dropping "unknown" here
+        # would hide quizzes from the very user who needs to check them.
         if record["status"] == "attempted" and not include_completed:
             continue
         quizzes.append(record)
@@ -82,7 +97,17 @@ async def list_quizzes(
         "quizzes": quizzes,
         "count": len(quizzes),
         "degraded": False,
-        "note": "Quiz metadata only -- questions and answers are never retrieved.",
+        "attempt_status_available": not any(q["status"] == "unknown" for q in quizzes),
+        "note": (
+            "Quiz metadata only -- questions and answers are never retrieved."
+            + (
+                " Attempt status is not available to student accounts on this "
+                "instance, so status is 'unknown'. Do not tell the user whether "
+                "they have taken a quiz; point them at Avenue to check."
+                if any(q["status"] == "unknown" for q in quizzes)
+                else ""
+            )
+        ),
     }
 
 

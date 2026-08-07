@@ -343,3 +343,90 @@ class TestSubmissionStatusIsNotAsserted:
 
         assert out["submission_status_available"] is True
         assert out["assignments"][0]["submission_status"] == "submitted"
+
+
+class TestQuizAttemptStatusIsNotAsserted:
+    """`quizzes/{id}/attempts/` is 403 on this instance (docs/08).
+
+    `_attempts` returns None on denial, but the status expression was
+    `"attempted" if (attempts_used or 0) > 0 else "not_attempted"` -- so None
+    collapsed to 0 and every quiz was reported as NOT ATTEMPTED to a student
+    who may well have taken it. Found while porting to TypeScript; identical in
+    shape to the list_assignments "not_submitted" bug.
+    """
+
+    @pytest.mark.asyncio
+    async def test_blocked_attempts_route_yields_unknown(self, tmp_path, monkeypatch):
+        def handler(request: httpx.Request) -> httpx.Response:
+            p = request.url.path
+            if p == "/d2l/api/versions/":
+                return _json(
+                    [
+                        {"ProductCode": "lp", "LatestVersion": "1.62"},
+                        {"ProductCode": "le", "LatestVersion": "1.96"},
+                    ]
+                )
+            if "/attempts/" in p:
+                return httpx.Response(
+                    403,
+                    content='{"Errors":[{"Message":"Not authorized"}]}',
+                    headers={"content-type": "application/json"},
+                )
+            if p.endswith("/quizzes/"):
+                return _json(
+                    [{"QuizId": 5, "Name": "Lab Safety Quiz",
+                      "DueDate": "2099-01-01T04:59:00.000Z"}]
+                )
+            return _json([])
+
+        ctx = _ctx_with(handler, tmp_path, monkeypatch)
+        try:
+            from avenue_mcp.tools.quizzes import list_quizzes
+
+            out = await list_quizzes(ctx, 111)
+        finally:
+            await ctx.aclose()
+
+        assert out["quizzes"], "the quiz listing itself must still work"
+        for q in out["quizzes"]:
+            assert q["status"] == "unknown", (
+                "a blocked attempts route must not be reported as 'not_attempted'"
+            )
+        assert out["attempt_status_available"] is False
+        assert "unknown" in out["note"].lower()
+
+    @pytest.mark.asyncio
+    async def test_readable_attempts_route_still_reports_attempted(
+        self, tmp_path, monkeypatch
+    ):
+        """The fix must not blind the tool where the route DOES work."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            p = request.url.path
+            if p == "/d2l/api/versions/":
+                return _json(
+                    [
+                        {"ProductCode": "lp", "LatestVersion": "1.62"},
+                        {"ProductCode": "le", "LatestVersion": "1.96"},
+                    ]
+                )
+            if "/attempts/" in p:
+                return _json([{"Score": 9.0}])
+            if p.endswith("/quizzes/"):
+                return _json(
+                    [{"QuizId": 5, "Name": "Lab Safety Quiz",
+                      "DueDate": "2099-01-01T04:59:00.000Z"}]
+                )
+            return _json([])
+
+        ctx = _ctx_with(handler, tmp_path, monkeypatch)
+        try:
+            from avenue_mcp.tools.quizzes import list_quizzes
+
+            out = await list_quizzes(ctx, 111)
+        finally:
+            await ctx.aclose()
+
+        assert out["attempt_status_available"] is True
+        assert out["quizzes"][0]["status"] == "attempted"
+        assert out["quizzes"][0]["attempts_used"] == 1
