@@ -4,7 +4,21 @@ Every Valence route this server depends on. Reference: [`docs.valence.desire2lea
 
 ## Conventions
 
-**Base URL.** `https://avenue.mcmaster.ca`
+**Base URL.** Per institution — there is no single one. The registry lives in
+[`avenue_mcp/institutions.py`](../src/avenue_mcp/institutions.py), and the two measured
+instances are:
+
+| Institution | Brightspace host | What the school calls it |
+|---|---|---|
+| McMaster | `https://avenue.cllmcmaster.ca` | Avenue to Learn |
+| Carleton | `https://brightspace.carleton.ca` | Brightspace |
+
+`avenue.mcmaster.ca` is **not** McMaster's Brightspace — it is a static landing page where
+every `/d2l/*` path 404s. It is the *login* entry point only, which is why host and login
+URL are separate fields. See [`08-api-probe-results.md`](08-api-probe-results.md).
+
+Every route below is relative to whichever host is in play; the routes themselves are
+identical across instances, and both run `lp 1.62` / `le 1.96`.
 
 **Path shape.** `/d2l/api/{component}/{version}/{resource}`
 
@@ -19,13 +33,25 @@ Every Valence route this server depends on. Reference: [`docs.valence.desire2lea
 
 | Marker | Meaning |
 |---|---|
-| ✅ **Verified** | Confirmed working on a McMaster student account during Phase 0 |
-| 🔵 **Expected** | Documented as learner-accessible; not yet probed |
+| ✅ **Verified** | Measured working on a student account **on the instance named in that column** |
+| ⛔ **Blocked** | Measured, and denied to students on that instance |
+| ⬜ **Unverified** | Nobody has reached it there. **Not** a synonym for blocked |
+| 🔵 **Expected** | Documented as learner-accessible; a prediction, not a measurement |
 | ⚠️ **Uncertain** | Docs mark it instructor-scope. May 403, may return a filtered view. **Must be probed.** |
-| ⛔ **Blocked** | Probed and denied to students |
 | 🔒 **Gated** | Write operation. Specced, not shipped in v1. |
 
-**Everything below is currently 🔵 or ⚠️.** Nothing is ✅ until Phase 0 runs. Results land in [`08-api-probe-results.md`](08-api-probe-results.md) and this table gets updated from them — not the other way around.
+**A marker is per instance, never global.** ✅ at Carleton says nothing about McMaster, and
+the summary table keeps a column each so the difference stays visible. Two instances have
+been probed ([`08`](08-api-probe-results.md) McMaster, [`09`](09-carleton-probe-results.md)
+Carleton); a third would arrive with every route ⬜.
+
+**The per-route `Status:` lines below are predictions** derived from the Valence docs, and
+they are deliberately left as written even where a measurement has since contradicted them
+— the gap between "documented instructor-scope" and "actually reachable" is itself a
+finding. What was *measured* lives in the [summary table](#summary-table) at the bottom.
+Where the two disagree, **the measurement wins**, and the flow is always
+probe → probe doc → this table → [`institutions.py`](../src/avenue_mcp/institutions.py),
+never the reverse.
 
 ---
 
@@ -425,7 +451,7 @@ The RAG sync is the one operation that issues many requests at once, and it is t
 
 | HTTP | Meaning | Client behavior |
 |---|---|---|
-| `200` + `text/html` | Session expired (login page) | `SessionExpiredError` — see [`01`](01-authentication.md) |
+| `200` + `text/html` | Session expired (login page) — **except on the file-download route**, where an instructor may simply have uploaded an `.html` file. There the discriminator is `Content-Disposition: attachment`, which a login page does not send. Measured: without that exception, downloading one such file reported an expired session on a live one ([`09`](09-carleton-probe-results.md)). | `SessionExpiredError` — see [`01`](01-authentication.md) |
 | `302` → login host | Session expired | `SessionExpiredError` |
 | `400` | Bad parameters | `InvalidRequestError`, don't retry |
 | `401` | Not authenticated | `SessionExpiredError` |
@@ -440,39 +466,71 @@ The `403` vs `401` distinction is load-bearing: `403` on a healthy session is a 
 
 ## Summary table
 
-| Purpose | Route | Status | Tool |
-|---|---|---|---|
-| Version discovery | `GET /d2l/api/versions/` | 🔵 | internal |
-| Identity | `GET /lp/{v}/users/whoami` | 🔵 | internal |
-| My courses | `GET /lp/{v}/enrollments/myenrollments/` | 🔵 | `list_courses` |
-| Course details | `GET /lp/{v}/courses/{id}` | 🔵 | `list_courses` |
-| Content root | `GET /le/{v}/{id}/content/root/` | 🔵 | `get_course_content` |
-| Module structure | `GET /le/{v}/{id}/content/modules/{m}/structure/` | 🔵 | `get_course_content` |
-| Topic metadata | `GET /le/{v}/{id}/content/topics/{t}` | 🔵 | `read_content_file` |
-| Topic file | `GET /le/{v}/{id}/content/topics/{t}/file` | 🔵 | `read_content_file` |
-| Assignment folders | `GET /le/{v}/{id}/dropbox/folders/` | ⚠️ | `list_assignments` |
-| One folder | `GET /le/{v}/{id}/dropbox/folders/{f}` | ⚠️ | `list_assignments` |
-| My submissions | `GET /le/{v}/{id}/dropbox/folders/{f}/submissions/mysubmissions/` | 🔵 | `list_assignments` |
-| My feedback | `GET /le/{v}/{id}/dropbox/folders/{f}/feedback/{et}/{ei}` | ⚠️ | `list_assignments` |
-| My grades | `GET /le/{v}/{id}/grades/values/myGradeValues/` | 🔵 | `get_grades` |
-| Grade structure | `GET /le/{v}/{id}/grades/` | ⚠️ | `analyze_grade_summary` |
-| Announcements | `GET /le/{v}/{id}/news/` | 🔵 | `list_announcements` |
-| My calendar | `GET /le/{v}/{id}/calendar/events/myEvents/` | 🔵 | `get_upcoming_deadlines` |
-| Quizzes | `GET /le/{v}/{id}/quizzes/` | ⚠️ | `list_quizzes` |
-| My quiz attempts | `GET /le/{v}/{id}/quizzes/{q}/attempts/` | ⚠️ | `list_quizzes` |
-| Discussion forums | `GET /le/{v}/{id}/discussions/forums/` | 🔵 | `list_discussions` |
-| Forum topics | `GET /le/{v}/{id}/discussions/forums/{f}/topics/` | 🔵 | `list_discussions` |
-| Thread posts | `GET /le/{v}/{id}/discussions/forums/{f}/topics/{t}/posts/` | 🔵 | `read_discussion_thread` |
-| Class list | `GET /lp/{v}/{id}/classlist/` | ⚠️ | `get_class_list` |
-| Submit work | `POST /le/{v}/{id}/dropbox/folders/{f}/submissions/mysubmissions/` | 🔒 | v2 |
+The per-route **Status:** lines above are *predictions* from the Valence docs. This table is
+what was **measured**, per instance. Where the two disagree, the measurement wins — the
+prediction is left in place only so the gap between "documented as instructor-scope" and
+"actually reachable" stays visible.
 
-**Six ⚠️ rows, unevenly important.** Priority order for Phase 0:
+Both instances run `lp 1.62` / `le 1.96`. ✅ permitted · ⛔ 403 · ⬜ unverified (never reached)
 
-1. **`dropbox/folders/`** — gates the assignments feature entirely.
-2. **`calendar/events/myEvents/`** — not ⚠️, but probe it early anyway: it's the fallback for *both* assignments and quizzes, so if it's missing due dates, two features lose their safety net at once.
-3. **`grades/`** — gates grade projection.
-4. **`quizzes/`** — gates quiz status; deadlines survive via the calendar regardless.
-5. **`classlist/`** — most likely blocked, matters least.
+| Purpose | Route | McMaster | Carleton | Tool |
+|---|---|---|---|---|
+| Version discovery | `GET /d2l/api/versions/` | ✅ | ✅ | internal |
+| Identity | `GET /lp/{v}/users/whoami` | ✅ | ✅ | internal |
+| My courses | `GET /lp/{v}/enrollments/myenrollments/` | ✅ | ✅ | `list_courses` |
+| Course details | `GET /lp/{v}/courses/{id}` | ⛔ | ⛔ | `list_courses` |
+| Content root | `GET /le/{v}/{id}/content/root/` | ✅ | ✅ ¹ | `get_course_content` |
+| Module structure | `GET /le/{v}/{id}/content/modules/{m}/structure/` | ✅ | ✅ ¹ | `get_course_content` |
+| Topic metadata | `GET /le/{v}/{id}/content/topics/{t}` | ✅ | ✅ | `read_content_file` |
+| Topic file | `GET /le/{v}/{id}/content/topics/{t}/file` | ✅ | ✅ ² | `read_content_file` |
+| Assignment folders | `GET /le/{v}/{id}/dropbox/folders/` | ✅ | ✅ | `list_assignments` |
+| One folder | `GET /le/{v}/{id}/dropbox/folders/{f}` | ✅ | ✅ | `list_assignments` |
+| My submissions | `GET …/dropbox/folders/{f}/submissions/mysubmissions/` | ⛔ | ⛔ ³ | `list_assignments` |
+| My feedback | `GET …/dropbox/folders/{f}/feedback/{et}/{ei}` | ⬜ | ⬜ | `list_assignments` |
+| My grades | `GET /le/{v}/{id}/grades/values/myGradeValues/` | ✅ | ✅ | `get_grades` |
+| Grade structure | `GET /le/{v}/{id}/grades/` | ✅ | ✅ | `analyze_grade_summary` |
+| Announcements | `GET /le/{v}/{id}/news/` | ✅ | ✅ | `list_announcements` |
+| My calendar | `GET /le/{v}/{id}/calendar/events/myEvents/` | ✅ ⁴ | ✅ ⁴ | `get_upcoming_deadlines` |
+| Quizzes | `GET /le/{v}/{id}/quizzes/` | ✅ | ✅ | `list_quizzes` |
+| My quiz attempts | `GET /le/{v}/{id}/quizzes/{q}/attempts/` | ⛔ | ⛔ | `list_quizzes` |
+| Discussion forums | `GET /le/{v}/{id}/discussions/forums/` | ✅ | ✅ | `list_discussions` |
+| Forum topics | `GET …/discussions/forums/{f}/topics/` | ⬜ ⁵ | ✅ | `list_discussions` |
+| Thread posts | `GET …/discussions/forums/{f}/topics/{t}/posts/` | ⬜ ⁵ | ✅ ⁶ | `read_discussion_thread` |
+| Class list | `GET /le/{v}/{id}/classlist/` | ✅ ⁷ | ✅ ⁷ | `get_class_list` |
+| Role-filtered enrollments | `GET /lp/{v}/enrollments/orgUnits/{id}/users/` | ⛔ | ⛔ | `get_class_list` fallback |
+| Submit work | `POST …/dropbox/folders/{f}/submissions/mysubmissions/` | 🔒 | 🔒 | v2 |
+
+¹ Reachable, but **omits `Url` on topics** — so the filename has no extension and nothing is
+indexable or renderable until it is back-filled from topic metadata. See
+[`09`](09-carleton-probe-results.md); `client/topics.py` handles it.
+
+² Includes files whose own content type is `text/html`. Do **not** treat `200 + text/html`
+as a login wall on this route (see the corrected error table above).
+
+³ Denied on every real assignment folder. One stray folder returned `200 []`, which is why a
+one-folder sample is not evidence — check this route across several folders.
+
+⁴ Permitted on both, but returned **zero events** on both probed courses, so it is not a
+dependable deadline fallback. Deadlines come from `dropbox/folders/` and `quizzes/`.
+
+⁵ The probed McMaster course's forums were empty, so nothing below the forum list was ever
+reached there. Unverified, **not** denied — and Carleton's result must not be read across.
+
+⁶ Carries `Message.Html` and `ParentPostId` (so question→reply chunking works) but **no role
+field**. `author_role` is resolved from the roster; see `client/roles.py`.
+
+⁷ Predicted blocked, measured **readable on both** — returning full names and emails.
+`get_class_list` withholds the roster anyway on FIPPA grounds: available is not the same as
+appropriate.
+
+**What the two instances agree on.** All four denials (`courses/{id}`, `mysubmissions`,
+`quiz_attempts`, `orgunit_users`) match exactly, at the same API version — good evidence they
+are D2L role defaults rather than per-institution configuration, and a reasonable prior for
+the next school. A prior, not a result: it stays ⬜ until someone probes one.
+
+**Where they differ** is in *shape*, not permissions — the `Url` omission and the missing post
+role. Every bug found by adding a second instance was of that kind, and all of them failed
+silently. New instances should be probed for shape as well as access.
 
 ## Routes deliberately not used
 

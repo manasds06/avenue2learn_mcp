@@ -8,6 +8,7 @@ does not cost you the other 41 files.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -15,6 +16,8 @@ from typing import Any
 
 from avenue_mcp.client.d2l import D2LClient
 from avenue_mcp.client import models as m
+from avenue_mcp.client.roles import role_map, role_of_post
+from avenue_mcp.client.topics import has_extension, resolve_many
 from avenue_mcp.config import Settings
 from avenue_mcp.errors import (
     APIError,
@@ -207,7 +210,47 @@ class Syncer:
         unique: dict[int, dict[str, Any]] = {}
         for t in found:
             unique.setdefault(t["topic_id"], t)
+        await self._resolve_missing_filenames(org_unit_id, unique)
         return list(unique.values())
+
+    async def _resolve_missing_filenames(
+        self, org_unit_id: int, topics: dict[int, dict[str, Any]]
+    ) -> None:
+        """Back-fill names for topics whose listing entry has no extension.
+
+        The resolution itself lives in client/topics.py, shared with
+        tools/content.py -- these two were briefly separate implementations of
+        the same fix, which is precisely the drift that module exists to stop.
+
+        Only topics lacking a usable extension are fetched, so an instance whose
+        listing already carries `Url` costs nothing.
+        """
+        pending = [
+            (tid, t)
+            for tid, t in topics.items()
+            if not has_extension(t.get("file_name") or "")
+        ]
+        if not pending:
+            return
+
+        resolved = await resolve_many(
+            self.client, org_unit_id, [dict(t, Id=tid) for tid, t in pending]
+        )
+        for (tid, topic), (name, mime) in zip(pending, resolved):
+            if name and extractor.is_supported(name):
+                topic["file_name"] = name
+                topic["mime_type"] = mime
+            if topic.get("last_modified") is None:
+                try:
+                    detail = await self.client.get(
+                        "le", f"{org_unit_id}/content/topics/{tid}"
+                    )
+                except APIError:
+                    continue
+                if isinstance(detail, dict):
+                    topic["last_modified"] = m.pick(
+                        detail, "LastModifiedDate", "LastModified"
+                    )
 
     async def _index_file(
         self,
@@ -287,6 +330,9 @@ class Syncer:
             return
 
         newest_seen: str | None = None
+        # Fetched once per course, not per thread. Roster is read for id -> role
+        # only; no name ever reaches the index.
+        roles = await role_map(self.client, org_unit_id)
 
         for forum in forums if isinstance(forums, list) else []:
             forum_id = m.as_int(m.pick(forum, "ForumId", "Id"))
@@ -322,7 +368,9 @@ class Syncer:
                     )
                     continue
 
-                normalized = [self._normalize_post(p) for p in posts if isinstance(p, dict)]
+                normalized = [
+                    self._normalize_post(p, roles) for p in posts if isinstance(p, dict)
+                ]
                 normalized = [p for p in normalized if p.get("text")]
                 if not normalized:
                     continue
@@ -374,18 +422,21 @@ class Syncer:
             self.store.set_watermark(org_unit_id, "discussions", newest_seen)
 
     @staticmethod
-    def _normalize_post(post: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_post(
+        post: dict[str, Any], roles: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         """Extract only what we keep. Author NAMES are deliberately dropped --
         role carries the signal, and a name would make the index a durable
-        record of classmates' opinions."""
+        record of classmates' opinions.
+
+        `roles` maps user id -> role for instances whose posts carry no role
+        field. Without it every indexed post is "Unknown", which strips the
+        index of the instructor-vs-classmate distinction that makes forum
+        search worth doing. See client/roles.py."""
         body = m.pick(post, "Message", "Body", "Content", default="")
         if isinstance(body, dict):
             body = m.pick(body, "Html", "Text", "Content", default="")
-        role = m.pick(post, "AuthorRole", "Role", "RoleName")
-        if role is None:
-            role = m.pick(post, "Author", default={})
-            if isinstance(role, dict):
-                role = m.pick(role, "Role", "RoleName", "RoleAlias")
+        role = role_of_post(post, roles)
         return {
             "post_id": m.as_int(m.pick(post, "PostId", "Id")),
             "parent_post_id": m.as_int(m.pick(post, "ParentPostId", "ParentId")),

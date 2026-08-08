@@ -16,6 +16,7 @@ from typing import Any
 from avenue_mcp.client import models as m
 from avenue_mcp.context import AppContext
 from avenue_mcp.errors import APIError, PermissionDeniedError
+from avenue_mcp.util.capability import describe_denial
 
 log = logging.getLogger(__name__)
 
@@ -47,9 +48,9 @@ async def get_class_list(ctx: AppContext, org_unit_id: int) -> dict[str, Any]:
     except PermissionDeniedError as exc:
         log.info("classlist denied for %s (expected): %s", org_unit_id, exc)
         note = (
-            "The full class roster is not accessible from a student account on "
-            "this instance -- this is expected, not an error. Showing course "
-            "staff only."
+            "The full class roster could not be read from this account. "
+            + describe_denial(ctx.settings, "classlist")
+            + " Showing course staff only."
         )
     except APIError as exc:
         note = f"Could not read the class list: {exc}"
@@ -67,7 +68,7 @@ async def get_class_list(ctx: AppContext, org_unit_id: int) -> dict[str, Any]:
     if not instructors and note is None:
         note = (
             "No instructor information could be retrieved for this course from "
-            "the API. Check the course homepage on Avenue directly."
+            "the API. Check the course homepage on Brightspace directly."
         )
 
     if instructors and not any(i.get("email") for i in instructors):
@@ -77,7 +78,7 @@ async def get_class_list(ctx: AppContext, org_unit_id: int) -> dict[str, Any]:
         # conventionally <macid>@mcmaster.ca -- but composing one would be a
         # guess presented as a contact detail, so the tool reports the gap.
         contact_note = (
-            "Avenue did not provide email addresses for course staff. Names and "
+            "Brightspace did not provide email addresses for course staff. Names and "
             "roles are accurate; find contact details on the course homepage or "
             "in the outline rather than guessing an address."
         )
@@ -87,10 +88,10 @@ async def get_class_list(ctx: AppContext, org_unit_id: int) -> dict[str, Any]:
         # Withholding this is a deliberate choice, not a limitation, so say so
         # rather than letting an empty array read as "no classmates found".
         note = (
-            f"{len(students)} student records were returned by Avenue but are "
+            f"{len(students)} student records were returned by Brightspace but are "
             f"deliberately not included here. A roster with names and emails is "
             f"personal information under FIPPA, and this tool returns course "
-            f"staff by design. Ask the user to look them up on Avenue directly "
+            f"staff by design. Ask the user to look them up on Brightspace directly "
             f"if they genuinely need a classmate's contact details."
         )
 
@@ -98,7 +99,7 @@ async def get_class_list(ctx: AppContext, org_unit_id: int) -> dict[str, Any]:
         "org_unit_id": org_unit_id,
         "course_name": await ctx.course_name(org_unit_id),
         "instructors": instructors,
-        # NOT returned in bulk, even when Avenue hands them over.
+        # NOT returned in bulk, even when Brightspace hands them over.
         #
         # Both implementations of this tool were written expecting a 403 here,
         # per docs/02 and docs/07. The live probe found the route DOES work for

@@ -120,6 +120,56 @@ class TestDescriptions:
         assert "caveats" in tool.description.lower()
 
 
+class TestInstitutionNeutralDescriptions:
+    """Tool descriptions are frozen at import, so they must name no institution.
+
+    "Avenue to Learn" is McMaster's brand for its Brightspace instance. A
+    Carleton student being told to "check the gradebook on Avenue" is being sent
+    to a product that does not exist for them.
+    """
+
+    async def test_no_institution_branding_in_any_description(self, isolated):
+        from avenue_mcp.server import build
+
+        for tool in await build().list_tools():
+            for banned in ("Avenue", "McMaster", "MacID", "MyCarletonOne"):
+                assert banned not in tool.description, f"{tool.name}: {banned}"
+
+    async def test_class_list_names_the_field_it_returns(self, isolated):
+        # This description used to promise `student_roster_available`, a key
+        # tools/classlist.py has never returned, and to blame a restriction the
+        # probe disproved -- the roster is withheld on purpose.
+        from avenue_mcp.server import build
+
+        tool = next(t for t in await build().list_tools() if t.name == "get_class_list")
+        assert "student_roster_returned" in tool.description
+        assert "student_roster_available" not in tool.description
+
+
+class TestInstructions:
+    """_instructions is a pure function so it can be tested without reloading
+    server.py -- reimporting would re-register all 17 tools on a fresh global."""
+
+    def test_names_the_institutions_own_product(self):
+        from avenue_mcp.institutions import CARLETON, MCMASTER
+        from avenue_mcp.server import _instructions
+
+        assert "Avenue to Learn" in _instructions(MCMASTER)
+        assert "Avenue" not in _instructions(CARLETON)
+        assert "Carleton University" in _instructions(CARLETON)
+
+    def test_unverified_instance_is_flagged_to_the_model(self):
+        # Both registry profiles have been probed, so an unverified instance
+        # means a school we have no entry for -- reached via a base_url override.
+        from avenue_mcp.institutions import CARLETON, MCMASTER, custom_institution
+        from avenue_mcp.server import _instructions
+
+        unknown = custom_institution("https://lms.someschool.ca")
+        assert "have not been verified" in _instructions(unknown)
+        assert "have not been verified" not in _instructions(MCMASTER)
+        assert "have not been verified" not in _instructions(CARLETON)
+
+
 class TestWriteGate:
     async def test_registered_when_enabled(self, tmp_path, monkeypatch):
         monkeypatch.setenv("AVENUE_MCP_STATE_DIR", str(tmp_path / "state"))

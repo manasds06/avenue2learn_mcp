@@ -6,7 +6,7 @@ CPython's chmod there only toggles the read-only attribute. The session file
 would keep whatever the parent directory grants (typically SYSTEM,
 Administrators, and the user) while the code reported it protected.
 
-Since session.json is equivalent to a logged-in Avenue session, "we called
+Since session.json is equivalent to a logged-in Brightspace session, "we called
 chmod" is not an acceptable answer on this platform. On POSIX these functions
 are inert — auth/login.py already sets the mode correctly there.
 """

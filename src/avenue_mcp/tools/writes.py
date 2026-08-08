@@ -142,7 +142,7 @@ async def submit_assignment(
             "response": result if isinstance(result, (dict, list)) else None,
             "note": (
                 "Submitted. Brightspace retains submission history -- this cannot "
-                "be undone. Verify on Avenue directly."
+                "be undone. Verify on Brightspace directly."
             ),
         }
     )

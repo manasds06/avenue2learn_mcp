@@ -15,8 +15,11 @@ from typing import Any
 
 from mcp.server.mcpserver import Image, MCPServer
 
+from avenue_mcp.config import get_settings
 from avenue_mcp.context import AppContext, get_context
 from avenue_mcp.errors import AvenueMCPError
+from avenue_mcp.institutions import Institution
+from avenue_mcp.util.logging import configure_logging
 from avenue_mcp.tools import (
     announcements as t_news,
     assignments as t_assign,
@@ -36,19 +39,41 @@ log = logging.getLogger(__name__)
 
 from avenue_mcp import __version__
 
-server = MCPServer(
-    "avenue",
-    title="Avenue to Learn",
-    version=__version__,
-    instructions=(
-        "Tools for McMaster's Avenue to Learn (D2L Brightspace). All tools are "
+def _instructions(prof: Institution) -> str:
+    """Compose the server instructions for one institution.
+
+    A pure function so it can be unit-tested without reloading this module --
+    reimporting server.py re-registers all 17 tools onto a fresh module global.
+    """
+    text = (
+        f"Tools for {prof.display}, a D2L Brightspace instance. All tools are "
         "read-only unless write mode is explicitly enabled.\n\n"
         "Start with list_courses to get an org_unit_id, or get_whats_new for a "
         "catch-up. When a tool fails, call get_status to find out why before "
         "telling the user to log in.\n\n"
         "Report deadline times using the `local` rendering, never the UTC one: "
-        "McMaster deadlines are Eastern and the UTC date is often a day later."
-    ),
+        f"deadlines are set in {prof.timezone} and the UTC date is often a day "
+        "later."
+    )
+    if not prof.verified:
+        text += (
+            "\n\nAPI permissions on this Brightspace instance have not been "
+            "verified yet. When a tool reports a route unavailable, relay that "
+            "as something observed on this call -- not as a known limitation of "
+            "the institution, and do not generalize it to other courses."
+        )
+    return text
+
+
+_PROFILE = get_settings().institution_profile
+
+server = MCPServer(
+    # The registered name stays "avenue" regardless of institution: renaming it
+    # would reset the user's tool-permission grants in their MCP client.
+    "avenue",
+    title=_PROFILE.display,
+    version=__version__,
+    instructions=_instructions(_PROFILE),
 )
 
 
@@ -88,9 +113,9 @@ def _guard(fn):  # noqa: ANN001, ANN202
 @server.tool()
 @_guard
 async def list_courses(include_inactive: bool = False) -> dict[str, Any]:
-    """List your current Avenue to Learn courses with IDs, names, codes, and term dates. Read-only.
+    """List your current Brightspace courses with IDs, names, codes, and term dates. Read-only.
 
-    USE THIS FIRST in almost any Avenue task -- every other course-scoped tool
+    USE THIS FIRST in almost any Brightspace task -- every other course-scoped tool
     needs an org_unit_id, and this is where you get one. Also answers "what am I
     taking this term?"
 
@@ -226,14 +251,14 @@ async def get_upcoming_deadlines(
     """Return assignments, quizzes, and other dated items due within a time window, ACROSS ALL your active courses, soonest first. Read-only.
 
     This is the tool for "what's due this week?", "what's coming up?", or "am I
-    forgetting anything?" -- the most common Avenue question there is.
+    forgetting anything?" -- the most common Brightspace question there is.
 
     Use list_assignments instead when you want the complete assignment list for
     ONE course, including items already past or submitted.
 
     Every timestamp carries both UTC and a local rendering. Report the LOCAL
-    value to the user: McMaster deadlines are Eastern, and a UTC date can be a
-    day later than the real deadline.
+    value to the user: deadlines are set in the institution's local timezone, and
+    a UTC date can be a day later than the real deadline.
     """
     return await t_assign.get_upcoming_deadlines(
         _ctx(), days_ahead=days_ahead, include_submitted=include_submitted
@@ -262,7 +287,7 @@ async def get_grades(org_unit_id: int) -> dict[str, Any]:
 async def analyze_grade_summary(
     org_unit_id: int, target_percentage: float | None = None
 ) -> dict[str, Any]:
-    """Compute your current standing in a course: weighted average of graded work, weight completed, weight remaining, and what you would need on remaining items to reach a target. Read-only calculation -- changes nothing on Avenue.
+    """Compute your current standing in a course: weighted average of graded work, weight completed, weight remaining, and what you would need on remaining items to reach a target. Read-only calculation -- changes nothing on Brightspace.
 
     Use this for "how am I doing?", "what do I need on the final to get 90?", or
     "which course needs attention?"
@@ -367,14 +392,16 @@ async def get_whats_new(
 @server.tool()
 @_guard
 async def get_class_list(org_unit_id: int) -> dict[str, Any]:
-    """Return the people associated with a course -- instructors and TAs, plus contact info where Avenue exposes it. Read-only.
+    """Return the people associated with a course -- instructors and TAs, plus contact info where Brightspace exposes it. Read-only.
 
     Use this for "who teaches this?" or "who do I email about the assignment?"
 
-    McMaster restricts full student rosters, so student_roster_available is
-    usually false and that is expected, not an error. Report the instructor
-    information and say plainly that the roster is unavailable -- do not imply
-    the course has no students.
+    This tool returns course staff by design and never returns the student
+    roster in bulk -- student_roster_returned is always false, and student_count
+    reports class size instead. That is a deliberate privacy choice, not a
+    failure, and it holds even where the API would hand the roster over. Report
+    the instructor information and say plainly that the roster is not included
+    -- do not imply the course has no students. Read the `note` field.
     """
     return await t_class.get_class_list(_ctx(), org_unit_id)
 
@@ -397,7 +424,7 @@ async def search_course_materials(
     Prefer this over read_content_file when you do not already know which file
     holds the answer.
 
-    Works even when the Avenue session has expired -- it reads a local index.
+    Works even when the Brightspace session has expired -- it reads a local index.
 
     Requires the course to have been indexed via sync_course_materials. Check
     `indexed_courses` in the response: an empty result from an unindexed course
@@ -417,7 +444,7 @@ async def search_course_materials(
 @server.tool()
 @_guard
 async def sync_course_materials(org_unit_id: int, force: bool = False) -> dict[str, Any]:
-    """Download and index a course's Content files and discussion threads so search_course_materials can search them. Writes ONLY to a local index -- changes nothing on Avenue.
+    """Download and index a course's Content files and discussion threads so search_course_materials can search them. Writes ONLY to a local index -- changes nothing on Brightspace.
 
     Run this once per course, then again when new material is posted.
     Incremental: unchanged files and threads are skipped.
@@ -438,7 +465,7 @@ async def sync_course_materials(org_unit_id: int, force: bool = False) -> dict[s
 @server.tool()
 @_guard
 async def get_status(check_session: bool = True) -> dict[str, Any]:
-    """Report the server's own state: whether an Avenue session is active and how old it is, which courses are indexed, the embedding model in use, and whether write mode is enabled. Read-only, and works with no session.
+    """Report the server's own state: whether an Brightspace session is active and how old it is, which courses are indexed, the embedding model in use, and whether write mode is enabled. Read-only, and works with no session.
 
     Use this when a tool has FAILED and you need to know why -- logged out, never
     synced, or genuinely no data -- or when the user asks whether things are set
@@ -469,7 +496,7 @@ def _register_writes() -> None:
         comment: str | None = None,
         confirm: bool = False,
     ) -> dict[str, Any]:
-        """Submit a file to an Avenue assignment as your submission, optionally with a comment. THIS WRITES TO AVENUE AND CANNOT BE UNDONE.
+        """Submit a file to an Brightspace assignment as your submission, optionally with a comment. THIS WRITES TO BRIGHTSPACE AND CANNOT BE UNDONE.
 
         TWO-STEP BY DESIGN. Call it first WITHOUT confirm to get a preview
         (course, assignment, due date, file name, size, hash). Show that preview
@@ -503,10 +530,11 @@ def build() -> MCPServer:
 
 def run() -> None:
     ctx = get_context()
-    logging.basicConfig(
-        level=getattr(logging, ctx.settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    # Shared with the CLI rather than a second basicConfig here. This one used to
+    # be its own copy, without the third-party cap -- safe only because importing
+    # this module installs a root handler first, which made the basicConfig a
+    # no-op. See util/logging.py.
+    configure_logging(ctx.settings.log_level)
     build()
     # stdio: startup does no network I/O and needs no session.
     server.run(transport="stdio")

@@ -146,7 +146,7 @@ async def analyze_grade_summary(
             caveats.append(
                 "Target projection withheld: the weights do not reconcile, so "
                 "any number computed here would be misleading. Check the "
-                "gradebook on Avenue directly."
+                "gradebook on Brightspace directly."
             )
         else:
             have = weighted / 100.0

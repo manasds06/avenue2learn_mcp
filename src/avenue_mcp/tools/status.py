@@ -80,10 +80,27 @@ async def get_status(ctx: AppContext, check_session: bool = True) -> dict[str, A
             "submissions cannot be undone."
         )
 
+    profile = ctx.settings.institution_profile
+    if not profile.verified:
+        advice.append(
+            f"API permissions on {profile.display} have not been probed yet. "
+            f"Routes reported unavailable may be course-specific rather than "
+            f"institution-wide -- treat them as observed, not established."
+        )
+
     return {
         "checked_at": to_utc_iso(now_utc()),
         "session": session,
         "index": index,
+        "institution": {
+            "id": profile.id,
+            "org_name": profile.org_name,
+            "lms_name": profile.lms_name,
+            "display": profile.display,
+            "credential_brand": profile.credential_brand,
+            "capabilities_verified": profile.verified,
+            "probed_at": profile.probed_at,
+        },
         "config": {
             "base_url": ctx.settings.base_url,
             "timezone": ctx.settings.timezone,
@@ -92,6 +109,7 @@ async def get_status(ctx: AppContext, check_session: bool = True) -> dict[str, A
             "render_dpi": ctx.settings.render_dpi,
             "grade_scale_configured": ctx.settings.grade_scale is not None,
             "state_dir": str(ctx.settings.state_dir),
+            "institution_dir": str(ctx.settings.institution_dir),
         },
         "offline_capable": OFFLINE_CAPABLE,
         "advice": advice or ["Everything looks set up."],

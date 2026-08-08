@@ -1,6 +1,6 @@
 """Interactive login via a real browser.
 
-McMaster SSO is MacID + password + 2FA. Fully headless credential-stuffing is
+University SSO means a password plus 2FA. Fully headless credential-stuffing is
 not a design goal: it is fragile and it means storing a password. So we open a
 real browser, let the user sign in, and keep the resulting session.
 
@@ -8,8 +8,13 @@ The browser is used ONLY to acquire a session. All real work afterwards goes
 through httpx -- Playwright is a login mechanism, not a scraping mechanism.
 
 Critically, this waits for a *post-login success signal* (an authenticated
-Avenue URL) rather than for specific form selectors. Selector-based waits break
-every time McMaster restyles the SSO page.
+Brightspace URL) rather than for specific form selectors. Selector-based waits
+break every time a school restyles its SSO page -- and there is no way to write
+selectors that cover every institution anyway.
+
+That last point is what makes this file institution-agnostic: it never touches
+the IdP's DOM, so it works unchanged across Microsoft Entra (McMaster), ADFS
+(Carleton), Shibboleth, or anything else a school puts in front of Brightspace.
 """
 
 from __future__ import annotations
@@ -49,19 +54,27 @@ def interactive_login(
     timeout_seconds: int = 300,
     headless: bool = False,
     login_url: str | None = None,
+    credential_brand: str | None = None,
+    lms_name: str = "Brightspace",
 ) -> dict[str, object]:
     """Open a browser, wait for the user to sign in, persist storage_state.
 
-    McMaster's flow spans THREE hosts, confirmed by tracing it live:
+    `login_url` is where we start and `base_url` is where success is detected.
+    These are not always the same host -- McMaster's flow spans three, confirmed
+    by tracing it live:
 
         avenue.mcmaster.ca/login.php   (static landing page, 302)
           -> login.microsoftonline.com/<tenant>/saml2   (MacID + 2FA)
           -> back via RelayState
           -> avenue.cllmcmaster.ca/d2l/...   (Brightspace; cookies land here)
 
-    So `login_url` is where we start and `base_url` is where success is
-    detected. Waiting on the wrong host is why a naive flow appears to hang
-    forever after a successful sign-in.
+    Carleton stays on one host throughout, going out to ADFS at cufed.carleton.ca
+    and back to brightspace.carleton.ca. Either way, waiting on the wrong host is
+    why a naive flow appears to hang forever after a successful sign-in.
+
+    `credential_brand` and `lms_name` only affect what the user is told, so a
+    wrong value is cosmetic. Passed as plain strings rather than a Settings or
+    Institution object to keep this module free of config imports.
 
     Returns the storage_state dict. Raises LoginTimeoutError if the user does
     not finish in time.
@@ -84,8 +97,11 @@ def interactive_login(
         page = context.new_page()
 
         print(f"\nOpening {entry}")
-        print("Sign in with your MacID (including 2FA).")
-        print(f"Waiting for a Brightspace session on {host} ...")
+        if credential_brand:
+            print(f"Sign in with your {credential_brand} (including 2FA).")
+        else:
+            print("Sign in with your university account (including 2FA).")
+        print(f"Waiting for a {lms_name} session on {host} ...")
         print("This window closes automatically once you're signed in.\n")
         page.goto(entry, wait_until="domcontentloaded")
 
@@ -140,7 +156,7 @@ def interactive_login(
 def _persist(state: dict[str, object], path: Path) -> None:
     """Write storage_state with owner-only permissions.
 
-    This file is equivalent to a logged-in Avenue session. Anyone with it can
+    This file is equivalent to a logged-in Brightspace session. Anyone with it can
     act as you until it expires.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,7 +177,17 @@ def _persist(state: dict[str, object], path: Path) -> None:
         os.chmod(tmp, 0o600)
     except (OSError, NotImplementedError):
         log.debug("could not chmod session file (non-POSIX filesystem?)")
-    tmp.replace(path)
+
+    # If the rename fails, the temp file still holds the complete cookie jar.
+    # Leaving it behind would strand a live credential at a path the caller
+    # never hears about -- and `with_suffix` makes that path `session.tmp`, not
+    # `session.json.tmp`, so a .gitignore rule written for the real name does
+    # not cover it. Delete it on any failure rather than relying on that.
+    try:
+        tmp.replace(path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
     try:
         os.chmod(path, 0o600)
     except (OSError, NotImplementedError):
@@ -174,6 +200,6 @@ def _persist(state: dict[str, object], path: Path) -> None:
         if sys.platform == "win32":
             log.warning(
                 "Could not restrict %s to your account. It is equivalent to a "
-                "logged-in Avenue session — check its permissions manually.",
+                "logged-in Brightspace session — check its permissions manually.",
                 path,
             )

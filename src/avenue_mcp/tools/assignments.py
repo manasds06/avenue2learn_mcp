@@ -16,6 +16,7 @@ from typing import Any
 from avenue_mcp.client import models as m
 from avenue_mcp.context import AppContext
 from avenue_mcp.errors import APIError, PermissionDeniedError
+from avenue_mcp.util.capability import capability_status, describe_denial
 from avenue_mcp.util.dates import (
     days_until,
     describe,
@@ -111,7 +112,7 @@ async def list_assignments(
 
         sub = await _my_submission(ctx, org_unit_id, folder_id)
         if isinstance(sub, _Unavailable):
-            # Do NOT leave this at "not_submitted". Avenue refused to tell us,
+            # Do NOT leave this at "not_submitted". Brightspace refused to tell us,
             # and reporting "you haven't submitted A3" to someone who has is a
             # confidently wrong answer about a deadline -- the single most
             # damaging thing this tool could say.
@@ -140,12 +141,16 @@ async def list_assignments(
         "submission_status_available": not status_unavailable,
     }
     if status_unavailable:
+        out["capability_status"] = capability_status(
+            ctx.settings, "dropbox_mysubmissions"
+        )
         out["note"] = (
-            "Submission status is not available on this Avenue instance -- the "
-            "learner submissions route is denied to student accounts, so every "
-            "assignment shows submission_status 'unknown'. Do not tell the user "
-            "they have or have not submitted anything; point them at Avenue to "
-            "check. Due dates, points, and instructions above are accurate."
+            "Submission status is not available -- the learner submissions route "
+            "was denied, so every assignment shows submission_status 'unknown'. "
+            + describe_denial(ctx.settings, "dropbox_mysubmissions")
+            + " Do not tell the user they have or have not submitted anything; "
+            "point them at Brightspace to check. Due dates, points, and "
+            "instructions above are accurate."
         )
     return out
 
@@ -261,7 +266,7 @@ async def _my_user_id(ctx: AppContext) -> int | None:
 async def get_upcoming_deadlines(
     ctx: AppContext, days_ahead: int = 14, include_submitted: bool = False
 ) -> dict[str, Any]:
-    """Cross-course, time-windowed. The most common Avenue question.
+    """Cross-course, time-windowed. The most common Brightspace question.
 
     Fans out across every active course, so this is the most request-heavy read
     tool -- throttled and cached like everything else.

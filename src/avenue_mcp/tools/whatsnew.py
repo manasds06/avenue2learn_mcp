@@ -140,7 +140,7 @@ async def get_whats_new(
             "so nothing has been skipped permanently."
         )
         if any(f["error"] in ("SessionExpiredError", "NoSessionError") for f in failures):
-            notes.append("The Avenue session looks invalid. Run `avenue-mcp login`.")
+            notes.append("The Brightspace session looks invalid. Run `avenue-mcp login`.")
 
     return {
         "since": to_utc_iso(override) if override else "per-course watermarks",

@@ -16,6 +16,7 @@ import hashlib
 import logging
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -159,10 +160,18 @@ def _pptx_to_pdf(path: Path) -> Path:
     """
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
+        # Platform-correct install advice: the apt line is wrong on the two
+        # platforms most likely to hit this, and a hint the user cannot follow
+        # reads as a broken feature rather than a missing dependency.
+        how = {
+            "win32": "install LibreOffice from libreoffice.org, or `winget install "
+            "TheDocumentFoundation.LibreOffice`",
+            "darwin": "`brew install --cask libreoffice`",
+        }.get(sys.platform, "`sudo apt install libreoffice-impress`")
         raise RenderError(
-            "Rendering PowerPoint slides needs LibreOffice. Install it "
-            "(`sudo apt install libreoffice-impress`), or ask for the slide's "
-            "text with read_content_file instead."
+            f"Rendering PowerPoint slides needs LibreOffice ({how}). PDF pages "
+            "render without it. Or ask for the slide's text with "
+            "read_content_file instead."
         )
     tmp = Path(tempfile.mkdtemp(prefix="avenue-render-"))
     try:

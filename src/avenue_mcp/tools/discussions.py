@@ -18,6 +18,7 @@ import logging
 from typing import Any
 
 from avenue_mcp.client import models as m
+from avenue_mcp.client.roles import role_map, role_of_post
 from avenue_mcp.context import AppContext
 from avenue_mcp.errors import APIError
 from avenue_mcp.util.dates import describe, parse_d2l
@@ -109,6 +110,11 @@ async def read_discussion_thread(
         "le", f"{org_unit_id}/discussions/forums/{forum_id}/topics/{topic_id}/posts/"
     )
 
+    # Posts on some instances carry no role field, only PostingUserId. Without
+    # this, every author is "Unknown" and has_instructor_replies is always false.
+    # Roster is used for id -> role only; names are never read out of it.
+    roles = await role_map(ctx.client, org_unit_id)
+
     posts: list[dict[str, Any]] = []
     for entry in raw:
         if not isinstance(entry, dict):
@@ -127,7 +133,7 @@ async def read_discussion_thread(
                 # Preserves the reply tree. Flattening destroys the
                 # question -> answer pairing, which is the whole value.
                 "parent_post_id": m.as_int(m.pick(entry, "ParentPostId", "ParentId")),
-                "author_role": m.normalize_role(_role_of(entry)),
+                "author_role": m.normalize_role(role_of_post(entry, roles)),
                 "posted_at": describe(posted, tz),
                 "body_text": text,
             }
@@ -152,12 +158,3 @@ async def read_discussion_thread(
         "note": "Author names are intentionally omitted; only roles are reported.",
     }
 
-
-def _role_of(entry: dict[str, Any]) -> Any:
-    role = m.pick(entry, "AuthorRole", "Role", "RoleName", "RoleAlias")
-    if role is not None:
-        return role
-    author = m.pick(entry, "Author", default={})
-    if isinstance(author, dict):
-        return m.pick(author, "Role", "RoleName", "RoleAlias")
-    return None

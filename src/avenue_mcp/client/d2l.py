@@ -224,7 +224,7 @@ class D2LClient:
             async with client.stream(
                 "GET", url, timeout=self.settings.download_timeout_seconds
             ) as resp:
-                self._raise_for_session(resp, url)
+                self._raise_for_session(resp, url, expect_json=False)
                 if resp.status_code >= 400:
                     # The body has not been read on a streaming response, and
                     # _raise_for_status touches resp.text to build its message.
@@ -310,7 +310,7 @@ class D2LClient:
                 # caught earlier as an expired session.)
                 if url.startswith("/d2l/api/"):
                     raise UpstreamError(
-                        f"Avenue returned a non-JSON body for {url}."
+                        f"Brightspace returned a non-JSON body for {url}."
                     ) from exc
                 return resp.text
 
@@ -322,12 +322,23 @@ class D2LClient:
         )
 
     @staticmethod
-    def _raise_for_session(resp: httpx.Response, url: str) -> None:
+    def _raise_for_session(
+        resp: httpx.Response, url: str, *, expect_json: bool = True
+    ) -> None:
         """Expiry detection that does not trust the status code alone.
 
         Brightspace may answer an expired session with a 302 to SSO, or a 200
         whose body is an HTML login form, rather than a clean 401. A naive
         client parses that HTML as JSON and reports a confusing error.
+
+        `expect_json=False` for file downloads, where `text/html` is a perfectly
+        ordinary course file (an instructor uploading a .html page) rather than a
+        sign-in wall. Measured on Carleton: downloading one such file raised
+        SessionExpiredError on a session that was demonstrably alive, telling the
+        user to log in again against a wall that did not exist -- the exact
+        failure the SessionExpired/PermissionDenied split exists to prevent
+        (docs/08). Real downloads carry `Content-Disposition: attachment`, which
+        a login page does not, so that is the discriminator there.
         """
         if 300 <= resp.status_code < 400:
             loc = resp.headers.get("location", "")
@@ -335,14 +346,18 @@ class D2LClient:
             api_host = urlparse(str(resp.request.url)).netloc.lower()
             if not loc or (host and host != api_host) or "login" in loc.lower():
                 raise SessionExpiredError(
-                    f"Avenue redirected {url} to sign-in; the session has expired."
+                    f"Brightspace redirected {url} to sign-in; the session has expired."
                 )
         if resp.status_code == 200 and url.startswith("/d2l/api/"):
             ctype = resp.headers.get("content-type", "").lower()
             if "text/html" in ctype:
-                raise SessionExpiredError(
-                    f"Avenue returned a login page for {url}; the session has expired."
-                )
+                disposition = resp.headers.get("content-disposition", "").lower()
+                served_as_file = "attachment" in disposition or "filename" in disposition
+                if expect_json or not served_as_file:
+                    raise SessionExpiredError(
+                        f"Brightspace returned a login page for {url}; the session "
+                        "has expired."
+                    )
 
     async def _resolve_403(self, exc: "_Ambiguous403") -> None:
         """Turn an ambiguous 403+HTML into the right typed error.
@@ -361,10 +376,10 @@ class D2LClient:
         if self._session_alive:
             raise PermissionDeniedError(
                 f"Access denied for {exc.url}. Your account cannot read this on "
-                f"Avenue -- it is likely instructor-only. {exc.detail}".strip()
+                f"Brightspace -- it is likely instructor-only. {exc.detail}".strip()
             )
         raise SessionExpiredError(
-            f"Avenue returned its sign-in wall for {exc.url}; the session is not valid."
+            f"Brightspace returned its sign-in wall for {exc.url}; the session is not valid."
         )
 
     @staticmethod
@@ -423,7 +438,7 @@ class D2LClient:
             raise InvalidRequestError(f"Request too large for {url}.")
         if code == 429:
             raise _RateLimited(resp)
-        raise UpstreamError(f"Avenue returned {code} for {url}. {detail}".strip())
+        raise UpstreamError(f"Brightspace returned {code} for {url}. {detail}".strip())
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -433,7 +448,7 @@ class _RateLimited(UpstreamError):
     """Internal: carries Retry-After so backoff can honor it."""
 
     def __init__(self, resp: httpx.Response) -> None:
-        super().__init__("Rate limited by Avenue.")
+        super().__init__("Rate limited by Brightspace.")
         self.retry_after = resp.headers.get("retry-after")
 
 

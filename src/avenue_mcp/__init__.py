@@ -1,4 +1,4 @@
-"""MCP server for McMaster's Avenue to Learn (D2L Brightspace).
+"""MCP server for McMaster's Brightspace (D2L Brightspace).
 
 Read-only by default. See docs/ for the design, and
 docs/07-risks-and-policy.md before enabling anything that writes.

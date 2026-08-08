@@ -132,8 +132,10 @@ Environment variables, loaded via `pydantic-settings`. No config file, no CLI fl
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AVENUE_MCP_BASE_URL` | `https://avenue.mcmaster.ca` | Instance URL. Configurable so another D2L school can use this. |
-| `AVENUE_MCP_STATE_DIR` | `~/.avenue-mcp` | Session, cache, index |
+| `AVENUE_MCP_INSTITUTION` | `mcmaster` | Which school's profile to load — `mcmaster` or `carleton`. Sets host, SSO entry point, timezone, and state subdirectory. |
+| `AVENUE_MCP_BASE_URL` | *(from the profile)* | Brightspace host. Override only for a school not in the registry. |
+| `AVENUE_MCP_LOGIN_URL` | *(from the profile)* | SSO entry point. Separate from the host because at McMaster they genuinely differ. |
+| `AVENUE_MCP_STATE_DIR` | `~/.avenue-mcp` | Session, cache, index — namespaced per institution beneath this |
 | `AVENUE_MCP_ENABLE_WRITES` | `0` | Gates submission tools. **Off.** |
 | `AVENUE_MCP_EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | Changing this invalidates the index |
 | `AVENUE_MCP_MAX_FILE_MB` | `100` | Download cap |
@@ -141,14 +143,32 @@ Environment variables, loaded via `pydantic-settings`. No config file, no CLI fl
 | `AVENUE_MCP_MIN_REQUEST_INTERVAL_MS` | `100` | Politeness floor |
 | `AVENUE_MCP_CACHE_TTL_SECONDS` | `300` | In-memory response cache |
 | `AVENUE_MCP_LOG_LEVEL` | `INFO` | |
-| `AVENUE_MCP_TIMEZONE` | `America/Toronto` | Local rendering of deadlines |
-| `AVENUE_MCP_KEEPALIVE_MINUTES` | `0` | Session keepalive interval. **`0` = off** pending Phase 0. |
+| `AVENUE_MCP_TIMEZONE` | *(from the profile; `America/Toronto` for both)* | Local rendering of deadlines |
+| `AVENUE_MCP_KEEPALIVE_MINUTES` | `0` | Session keepalive interval. **`0` = off**, and staying off: sessions were measured at ~6.8h, long enough that re-login is a minor cost, while polling to extend one is traffic the user did not ask for. |
 | `AVENUE_MCP_KEEPALIVE_IDLE_STOP` | `120` | Stop keepalive after this many idle minutes |
 | `AVENUE_MCP_INDEX_DISCUSSIONS` | `1` | Include discussion threads in the RAG corpus |
 | `AVENUE_MCP_RENDER_DPI` | `120` | Default `get_page_image` resolution |
 | `AVENUE_MCP_GRADE_SCALE` | *(unset)* | Path to a letter-grade cutoff table. **Unset means no letter projections.** |
 
-`AVENUE_MCP_BASE_URL` being configurable is worth a note: nothing in this design is McMaster-specific except the default URL and the login flow's success-detection. The Valence API is the same everywhere. Other D2L schools should mostly work.
+### Institution resolution
+
+`base_url`, `login_url`, and `timezone` all default from the profile named by
+`AVENUE_MCP_INSTITUTION`, and an explicit env override always wins — that is what lets an
+unlisted school work with no code change. One process serves **one** institution; two
+schools means two MCP server entries with two env blocks.
+
+Setting `AVENUE_MCP_BASE_URL` to a host the selected profile does not describe does **not**
+quietly keep that profile. `Settings._resolve_institution` swaps in a `custom_institution`:
+unbranded, and with an empty capabilities map, so every route reports "unverified". This is
+deliberate — inheriting another school's *measured* capabilities would let the server claim
+a route works somewhere nobody has ever tried it, which is the exact failure the capability
+system exists to prevent.
+
+The Valence API itself is the same everywhere; what differs per school is the host, the SSO
+entry point, what the school *calls* its Brightspace instance, and — the lesson from adding
+the second one — the **shape** of some responses. See
+[`../src/avenue_mcp/institutions.py`](../src/avenue_mcp/institutions.py) and
+[`09-carleton-probe-results.md`](09-carleton-probe-results.md).
 
 ### `AVENUE_MCP_GRADE_SCALE` — unset on purpose
 
