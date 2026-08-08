@@ -68,9 +68,7 @@ def _instructions(prof: Institution) -> str:
 _PROFILE = get_settings().institution_profile
 
 server = MCPServer(
-    # The registered name stays "avenue" regardless of institution: renaming it
-    # would reset the user's tool-permission grants in their MCP client.
-    "avenue",
+    "brightspace",
     title=_PROFILE.display,
     version=__version__,
     instructions=_instructions(_PROFILE),

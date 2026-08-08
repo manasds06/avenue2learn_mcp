@@ -1,9 +1,10 @@
 """Date handling.
 
-Brightspace returns UTC. McMaster deadlines are set in Eastern and typically
-land at 11:59 PM local, which is 03:59 or 04:59 UTC *the next day* depending
-on DST. Reporting "due March 16" for a March 15 deadline costs real marks, so
-every user-facing timestamp carries an explicit local rendering.
+Brightspace returns UTC. Deadlines are typically set in the institution's local
+timezone and often land at 11:59 PM local, which can be 03:59 or 04:59 UTC *the
+next day* depending on DST. Reporting "due March 16" for a March 15 deadline
+costs real marks, so every user-facing timestamp carries an explicit local
+rendering.
 """
 
 from __future__ import annotations
