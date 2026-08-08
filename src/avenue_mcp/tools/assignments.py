@@ -33,6 +33,31 @@ log = logging.getLogger(__name__)
 _INSTRUCTIONS_CAP = 2000
 
 
+def _folder_points(folder: dict[str, Any]) -> float | None:
+    """Max score for a dropbox folder.
+
+    Valence puts this at `Assessment.ScoreDenominator`. There is no top-level
+    `OutOf` field -- reading one returns None for every folder on every
+    instance, which is what shipped until Carleton output showed all nulls.
+    The flat spellings are kept only as a fallback for older versions.
+    """
+    assessment = m.pick(folder, "Assessment")
+    if isinstance(assessment, dict):
+        score = m.as_float(m.pick(assessment, "ScoreDenominator", "OutOf"))
+        if score is not None:
+            return score
+    return m.as_float(m.pick(folder, "OutOf", "PointsPossible", "TotalPoints"))
+
+
+def _folder_instructions(folder: dict[str, Any]) -> str | None:
+    """Instructions live under `CustomInstructions`, a RichText {Text, Html}."""
+    raw = m.pick(folder, "CustomInstructions", "Instructions", default="")
+    if isinstance(raw, dict):
+        raw = m.pick(raw, "Html", "Text", default="")
+    text, _ = truncate(to_text(str(raw or "")), _INSTRUCTIONS_CAP)
+    return text or None
+
+
 async def list_assignments(
     ctx: AppContext, org_unit_id: int, include_submitted: bool = True
 ) -> dict[str, Any]:
@@ -91,20 +116,14 @@ async def list_assignments(
             continue
 
         due = parse_d2l(m.pick(folder, "DueDate", "Due"))
-        instructions = m.pick(folder, "Instructions", default="")
-        if isinstance(instructions, dict):
-            instructions = m.pick(instructions, "Html", "Text", default="")
-        text, _ = truncate(to_text(str(instructions or "")), _INSTRUCTIONS_CAP)
 
         record: dict[str, Any] = {
             "folder_id": folder_id,
             "name": m.pick(folder, "Name", "Title"),
             "due_date": describe(due, tz),
             "days_until_due": days_until(due),
-            "points_possible": m.as_float(
-                m.pick(folder, "OutOf", "PointsPossible", "TotalPoints")
-            ),
-            "instructions_text": text or None,
+            "points_possible": _folder_points(folder),
+            "instructions_text": _folder_instructions(folder),
             "submission_status": "not_submitted",
             "submitted_at": None,
             "grade": None,
@@ -129,6 +148,16 @@ async def list_assignments(
         if record["submission_status"] == "submitted" and not include_submitted:
             continue
         assignments.append(record)
+
+    if status_unavailable:
+        # Once ANY folder has refused, a bare `200 []` from some other folder is
+        # not evidence of "nothing submitted" -- Carleton has a stray folder that
+        # answers exactly that while every real one 403s (docs/09). Leaving that
+        # one as "not_submitted" both contradicts the note below and asserts a
+        # submission fact on the weakest possible evidence.
+        for record in assignments:
+            if record["submission_status"] == "not_submitted":
+                record["submission_status"] = "unknown"
 
     assignments.sort(key=lambda a: (a["due_date"]["utc"] or "9999", a["name"] or ""))
 
@@ -344,7 +373,12 @@ async def _enrich_with_assignments(
     days_ahead: int,
     ref: Any,
 ) -> tuple[list[dict[str, Any]], bool]:
+    # Whether the SUBMISSIONS route answered -- not whether the folder listing
+    # did. Setting this from a successful folder read reports
+    # "submission_status_available: true" on an instance where every
+    # mysubmissions call 403s, directly contradicting list_assignments.
     any_status = False
+    any_denied = False
     by_course: dict[int, list[dict[str, Any]]] = {}
 
     for course in courses:
@@ -353,7 +387,6 @@ async def _enrich_with_assignments(
             folders = await ctx.client.get_paged("le", f"{oid}/dropbox/folders/")
         except APIError:
             continue
-        any_status = True
         records: list[dict[str, Any]] = []
         for folder in folders:
             if not isinstance(folder, dict):
@@ -363,16 +396,37 @@ async def _enrich_with_assignments(
             if fid is None or not within_window(due, days_ahead, ref):
                 continue
             sub = await _my_submission(ctx, oid, fid)
+            if isinstance(sub, _Unavailable):
+                # `_Unavailable` is a plain object and therefore TRUTHY, so a
+                # bare `if sub` marked every unreadable item "submitted" -- and
+                # the default include_submitted=False then dropped it from the
+                # answer. A denied route silently deleted real deadlines.
+                status = "unknown"
+                any_denied = True
+            else:
+                status = "submitted" if sub else "not_submitted"
+                any_status = True
             records.append(
                 {
                     "title": str(m.pick(folder, "Name", "Title", default="") or ""),
                     "due_utc": to_utc_iso(due),
-                    "status": "submitted" if sub else "not_submitted",
-                    "points_possible": m.as_float(m.pick(folder, "OutOf", "PointsPossible")),
+                    "status": status,
+                    "points_possible": _folder_points(folder),
                     "folder_id": fid,
                 }
             )
         by_course[oid] = records
+
+    if any_denied:
+        # A lone `200 []` from a stray folder does not make submission status
+        # available once a real folder has refused -- and reporting it as
+        # available here while list_assignments reports the opposite for the
+        # same course is a contradiction the model has no way to resolve.
+        any_status = False
+        for records in by_course.values():
+            for r in records:
+                if r["status"] == "not_submitted":
+                    r["status"] = "unknown"
 
     for d in deadlines:
         records = by_course.get(d["org_unit_id"], [])

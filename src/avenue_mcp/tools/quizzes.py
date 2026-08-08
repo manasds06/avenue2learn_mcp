@@ -14,6 +14,7 @@ from typing import Any
 from avenue_mcp.client import models as m
 from avenue_mcp.context import AppContext
 from avenue_mcp.errors import APIError, PermissionDeniedError
+from avenue_mcp.util.capability import capability_status, describe_denial
 from avenue_mcp.util.dates import days_until, describe, now_utc, parse_d2l
 
 log = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ async def list_quizzes(
         return await _calendar_fallback(ctx, org_unit_id, str(exc))
 
     quizzes: list[dict[str, Any]] = []
+    attempts_unavailable = False
     for q in raw:
         if not isinstance(q, dict):
             continue
@@ -48,6 +50,14 @@ async def list_quizzes(
             m.pick(q, "AttemptsAllowed", "MaxAttempts", "NumberOfAttemptsAllowed")
         )
         attempts_used, best = await _attempts(ctx, org_unit_id, quiz_id)
+        if attempts_used is None:
+            # Denied, not zero. Saying "not_attempted" about a quiz the student
+            # actually wrote is the same confidently-wrong claim the assignment
+            # path guards against.
+            status = "unknown"
+            attempts_unavailable = True
+        else:
+            status = "attempted" if attempts_used > 0 else "not_attempted"
 
         # Three dates, three meanings. A quiz can be submittable AFTER due but
         # BEFORE end -- telling a student it is closed when it is merely late is
@@ -64,7 +74,7 @@ async def list_quizzes(
             "days_until_due": days_until(due, now),
             "attempts_allowed": attempts_allowed,
             "attempts_used": attempts_used,
-            "status": "attempted" if (attempts_used or 0) > 0 else "not_attempted",
+            "status": status,
             "is_available_now": open_now,
             "is_past_due_but_open": past_due_open,
             "is_closed": bool(end and now > end),
@@ -76,19 +86,37 @@ async def list_quizzes(
 
     quizzes.sort(key=lambda x: (x["due_date"]["utc"] or "9999", x["name"] or ""))
 
-    return {
+    note = "Quiz metadata only -- questions and answers are never retrieved."
+    out: dict[str, Any] = {
         "org_unit_id": org_unit_id,
         "course_name": await ctx.course_name(org_unit_id),
         "quizzes": quizzes,
         "count": len(quizzes),
         "degraded": False,
-        "note": "Quiz metadata only -- questions and answers are never retrieved.",
+        "attempt_status_available": not attempts_unavailable,
     }
+    if attempts_unavailable:
+        out["capability_status"] = capability_status(ctx.settings, "quiz_attempts")
+        note += (
+            " Attempt status is NOT available -- the quiz attempts route was "
+            "denied, so every quiz shows status 'unknown'. "
+            + describe_denial(ctx.settings, "quiz_attempts")
+            + " Do not tell the user whether they have taken a quiz; point them "
+            "at Brightspace. Dates and availability above are accurate."
+        )
+    out["note"] = note
+    return out
 
 
 async def _attempts(
     ctx: AppContext, org_unit_id: int, quiz_id: int
 ) -> tuple[int | None, float | None]:
+    """`None` for the count means UNREADABLE, not zero.
+
+    The attempts route is denied to students on both measured instances, so
+    conflating "denied" with "no attempts" makes every quiz report
+    `not_attempted` -- including a midterm the student demonstrably wrote.
+    """
     try:
         data = await ctx.client.get_paged(
             "le", f"{org_unit_id}/quizzes/{quiz_id}/attempts/"

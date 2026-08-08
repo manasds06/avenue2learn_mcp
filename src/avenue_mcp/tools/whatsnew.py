@@ -232,7 +232,7 @@ async def _files(
 
 
 async def _grades(
-    ctx: AppContext, oid: int, course: str | None, mark: str | None,
+    ctx: AppContext, oid: int, course: str | None, _mark: str | None,
     changes: dict[str, list[dict[str, Any]]], mark_seen: bool = True,
 ) -> None:
     """Grades are not cached and not diffed by timestamp -- the API gives no
@@ -252,6 +252,14 @@ async def _grades(
         log.debug("grades unavailable for %s: %s", oid, exc)
         return
 
+    # Whether we have EVER read this course's grades -- the only sound basis for
+    # "is this value new". The old guard used `mark`, which an explicit `since`
+    # always populates, so asking "what's new in the last 60 days" dumped every
+    # graded item in every course, including terms two years old. Grades carry
+    # no "graded at" timestamp, so a time window cannot filter them at all; the
+    # watermark is the whole mechanism and it must not be bypassed.
+    seeded = ctx.store.get_watermark(oid, "grades:_seeded") is not None
+
     for val in values:
         earned = m.as_float(m.pick(val, "PointsNumerator", "PointsEarned"))
         if earned is None:
@@ -263,8 +271,9 @@ async def _grades(
             continue
         if mark_seen:
             ctx.store.set_watermark(oid, key, stamp)
-        if seen is None and mark is None:
-            continue  # first-ever run: do not report the whole gradebook
+        if not seeded:
+            continue  # first look at this course: record, report nothing
+
         changes["new_grades"].append(
             {
                 "course_name": course,
@@ -276,6 +285,9 @@ async def _grades(
                 ),
             }
         )
+
+    if mark_seen and not seeded:
+        ctx.store.set_watermark(oid, "grades:_seeded", "1")
 
 
 async def _discussions(

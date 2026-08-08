@@ -106,6 +106,19 @@ Notes:
 - **Paged.** Response carries a bookmark; follow it until exhausted. A student with many past terms will have more than one page.
 - Includes **inactive and past** enrollments. Filter to current offerings by org-unit type (`Course Offering`) and by term/date, or courses from three years ago will pollute every result.
 - The `OrgUnitTypeId` distinguishes course offerings from departments and semesters. Only offerings are useful to us.
+- **`IsActive`, `StartDate`, and `EndDate` live under `Access`, a *sibling* of `OrgUnit` —
+  not inside it.** Each item is `{OrgUnit: {...}, Access: {IsActive, StartDate, EndDate,
+  CanAccess, ...}, PinDate}`. Reading them off `OrgUnit` yields `None` every time, so the
+  date fallback treats every enrollment as current and the term filter silently does
+  nothing. Measured on Carleton (2026-08-07): 43 courses returned for `include_inactive=false`,
+  back to Fall 2024, all `is_active: true` with null dates. This failed on **both**
+  instances and is a plain misread of the schema, not a per-institution shape difference —
+  the fixture nested the fields the same wrong way, so the suite agreed with the bug.
+- **`Access.IsActive: true` does not mean "current."** D2L leaves past-term shells active
+  for years, so filtering on the flag alone still returns every course a student has ever
+  taken. Only `IsActive: false` is decisive; a course is current when the flag is not false
+  **and** `now` falls inside the date window. A course with no dates is treated as current
+  rather than hidden.
 
 ### Course details
 
