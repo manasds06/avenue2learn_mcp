@@ -44,6 +44,15 @@ MUST_BE_IGNORED = (
     "probe.json",
     "probe-carleton.json",
     "tests/fixtures/raw-response.json",
+    # login.py writes via `Path.with_suffix(".tmp")`, which REPLACES .json --
+    # so the interim file holding the full cookie jar is `session.tmp`, and a
+    # rule written for `session.json` does not cover it.
+    "session.tmp",
+    "storage_state.tmp",
+    "carleton/session.tmp",
+    # settings.log_dir / writes_log_path. writes.log records submissions.
+    "logs/writes.log",
+    "carleton/logs/writes.log",
 )
 
 # Proves the ignore check discriminates. Without these, a .gitignore of "*"
@@ -52,8 +61,22 @@ MUST_NOT_BE_IGNORED = ("README.md", "src/avenue_mcp/server.py", "notes.md")
 
 
 def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run git with the developer's own config neutralised.
+
+    `git check-ignore` also consults `core.excludesFile` (usually
+    `~/.config/git/ignore`) and the system config. Without this, whether a path
+    counts as ignored depends on the machine -- so an assertion could pass on a
+    laptop and fail in CI, or worse, pass in CI for a reason that has nothing to
+    do with this project's .gitignore.
+    """
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
     return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False, env=env
     )
 
 
@@ -73,11 +96,20 @@ def throwaway_repo(tmp_path: Path) -> Path:
     """A real git repo carrying this project's actual .gitignore."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    _git("init", "-q", cwd=repo)
-    # Identity, so `git status` works on a machine with no global git config.
+    # Check this: outside a repo, `git check-ignore` exits 128, and the negative
+    # controls assert only "exit != 0". A silently failed init would make them
+    # pass while proving nothing.
+    init = _git("init", "-q", cwd=repo)
+    assert init.returncode == 0, f"git init failed: {init.stderr}"
+    # Identity, so `git status` works with the global config neutralised.
     _git("config", "user.email", "test@example.ca", cwd=repo)
     _git("config", "user.name", "Test", cwd=repo)
+    # Neutralising the global *config* is not enough: git also reads
+    # $XDG_CONFIG_HOME/git/ignore as a default PATH, not as a config setting, so
+    # a developer's personal ignore list still applies unless overridden here.
+    _git("config", "core.excludesFile", os.devnull, cwd=repo)
     shutil.copy(REPO_ROOT / ".gitignore", repo / ".gitignore")
+    assert (repo / ".git").is_dir()
     return repo
 
 
@@ -125,6 +157,29 @@ class TestSessionFilePermissions:
 
         leftovers = [p.name for p in tmp_path.iterdir() if p.name != path.name]
         assert not leftovers, f"unexpected files alongside the session: {leftovers}"
+
+    def test_a_failed_rename_does_not_strand_the_cookie_jar(self, tmp_path):
+        """The unhappy path, which the happy-path test above cannot see.
+
+        `with_suffix(".tmp")` turns session.json into `session.tmp`, and that file
+        holds the complete cookie jar. If the rename fails, it must not survive:
+        it is a live credential at a path nobody is watching, and one whose name
+        the obvious .gitignore rule does not match.
+        """
+        from avenue_mcp.auth.login import _persist
+
+        target = tmp_path / "session.json"
+        # A directory at the destination makes `Path.replace` fail for real,
+        # rather than by monkeypatching the thing under test.
+        target.mkdir()
+
+        with pytest.raises(OSError):
+            _persist({"cookies": [{"name": "d2lSessionVal", "value": "secret"}]}, target)
+
+        stranded = tmp_path / "session.tmp"
+        assert not stranded.exists(), (
+            "session.tmp survived a failed rename holding the cookie jar"
+        )
 
 
 class TestStateLivesOutsideTheRepo:

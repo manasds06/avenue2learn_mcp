@@ -4,6 +4,12 @@
 session.json
 *.session.json
 storage_state.json
+# login.py writes via `Path.with_suffix(".tmp")`, which REPLACES the extension:
+# session.json -> session.tmp. A crash or a failed rename can leave that file
+# holding the whole cookie jar, so the temp name needs covering too.
+*.tmp
+# Per-institution logs (settings.log_dir). writes.log records submissions.
+logs/
 
 # Downloaded course material (instructor IP) and the local index
 cache/

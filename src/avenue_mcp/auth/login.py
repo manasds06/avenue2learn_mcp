@@ -177,7 +177,17 @@ def _persist(state: dict[str, object], path: Path) -> None:
         os.chmod(tmp, 0o600)
     except (OSError, NotImplementedError):
         log.debug("could not chmod session file (non-POSIX filesystem?)")
-    tmp.replace(path)
+
+    # If the rename fails, the temp file still holds the complete cookie jar.
+    # Leaving it behind would strand a live credential at a path the caller
+    # never hears about -- and `with_suffix` makes that path `session.tmp`, not
+    # `session.json.tmp`, so a .gitignore rule written for the real name does
+    # not cover it. Delete it on any failure rather than relying on that.
+    try:
+        tmp.replace(path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
     try:
         os.chmod(path, 0o600)
     except (OSError, NotImplementedError):

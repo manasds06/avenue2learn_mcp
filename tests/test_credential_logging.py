@@ -57,7 +57,20 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def local_server():
+def local_server(monkeypatch):
+    # httpx honours proxy env vars and, unlike requests, has NO implicit
+    # localhost bypass -- so on a machine behind a corporate/university proxy
+    # every test here would fail trying to reach 127.0.0.1 through it.
+    for var in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
     server = HTTPServer(("127.0.0.1", 0), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
@@ -207,6 +220,62 @@ class TestTheLeakIsRealWithoutTheCap:
         assert SENT_COOKIE not in captured_logs.getvalue()
 
 
+class TestEveryEntryPointCaps:
+    """The cap is worthless if a process start skips it.
+
+    This class exists because it was missing. Every test above calls
+    `cap_third_party_loggers()` by hand, so deleting the call from the real
+    startup path left all of them green while `avenue-mcp serve` leaked -- a
+    guard on one unprotected line, with nothing watching the line.
+
+    There are exactly two process entry points, and both must cap. If a third is
+    added, add it here.
+    """
+
+    @pytest.mark.parametrize("level", ["DEBUG", "debug", "INFO"])
+    def test_cli_setup_caps(self, captured_logs, level):
+        """`avenue-mcp <cmd>` goes through `main()` -> `_setup_logging`."""
+        from avenue_mcp.__main__ import _setup_logging
+
+        logging.getLogger("httpcore").setLevel(logging.NOTSET)
+        _setup_logging(level)
+
+        assert logging.getLogger("httpcore.http11").getEffectiveLevel() >= logging.INFO
+
+    def test_server_run_uses_the_same_setup(self):
+        """`server.run()` used to hold a second, uncapped `basicConfig`.
+
+        It was safe only because importing the module installs a root handler,
+        making its `basicConfig` a silent no-op -- safety by third-party accident.
+        Asserting on the shared function rather than calling `run()` (which would
+        block on stdio) keeps the two from drifting apart again.
+        """
+        import inspect
+
+        from avenue_mcp import server
+
+        # Comments are stripped: the body explains the old basicConfig, and
+        # matching prose would fail for the wrong reason.
+        code = "\n".join(
+            line.split("#", 1)[0]
+            for line in inspect.getsource(server.run).splitlines()
+        )
+        assert "configure_logging" in code
+        assert "basicConfig" not in code, (
+            "server.run() has its own logging setup again; it will not be capped"
+        )
+
+    def test_configure_logging_sends_records_to_stderr(self, capsys):
+        """A log line on stdout corrupts the MCP protocol stream."""
+        from avenue_mcp.util.logging import configure_logging
+
+        configure_logging("DEBUG")
+        logging.getLogger("avenue_mcp.test").warning("marker-not-for-stdout")
+
+        captured = capsys.readouterr()
+        assert "marker-not-for-stdout" not in captured.out
+
+
 class TestCapBehaviour:
     def test_is_idempotent(self, captured_logs):
         cap_third_party_loggers()
@@ -226,3 +295,18 @@ class TestCapBehaviour:
         child = logging.getLogger("httpcore.http11")
         assert child.level == logging.NOTSET  # untouched directly...
         assert not child.isEnabledFor(logging.DEBUG)  # ...but still muzzled
+
+    def test_a_child_with_its_own_level_is_capped_too(self, captured_logs):
+        """The case parent-only capping misses.
+
+        Once a child sets an explicit level, the parent's is ignored. No current
+        version of httpcore does this, so it is latent -- but the whole point of
+        the cap is that a library's logging choices are not ours to predict.
+        """
+        child = logging.getLogger("httpcore.http11")
+        child.setLevel(logging.DEBUG)
+        try:
+            cap_third_party_loggers()
+            assert not child.isEnabledFor(logging.DEBUG)
+        finally:
+            child.setLevel(logging.NOTSET)

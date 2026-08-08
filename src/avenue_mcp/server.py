@@ -19,6 +19,7 @@ from avenue_mcp.config import get_settings
 from avenue_mcp.context import AppContext, get_context
 from avenue_mcp.errors import AvenueMCPError
 from avenue_mcp.institutions import Institution
+from avenue_mcp.util.logging import configure_logging
 from avenue_mcp.tools import (
     announcements as t_news,
     assignments as t_assign,
@@ -529,10 +530,11 @@ def build() -> MCPServer:
 
 def run() -> None:
     ctx = get_context()
-    logging.basicConfig(
-        level=getattr(logging, ctx.settings.log_level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    # Shared with the CLI rather than a second basicConfig here. This one used to
+    # be its own copy, without the third-party cap -- safe only because importing
+    # this module installs a root handler first, which made the basicConfig a
+    # no-op. See util/logging.py.
+    configure_logging(ctx.settings.log_level)
     build()
     # stdio: startup does no network I/O and needs no session.
     server.run(transport="stdio")

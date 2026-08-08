@@ -14,18 +14,16 @@ import logging
 import sys
 
 from avenue_mcp.config import get_settings
-from avenue_mcp.util.logging import cap_third_party_loggers
+from avenue_mcp.util.logging import configure_logging
 
 
 def _setup_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,  # stdout is the MCP transport
-    )
-    # Must come after basicConfig: our level may be DEBUG, and at DEBUG httpcore
-    # logs every response header -- including Set-Cookie. See util/logging.py.
-    cap_third_party_loggers()
+    """Kept as a thin alias so the CLI reads the same as before.
+
+    The implementation is shared with `server.run()` -- see util/logging.py for
+    why having two copies of this was a credential leak waiting to happen.
+    """
+    configure_logging(level)
 
 
 def cmd_serve(_: argparse.Namespace) -> int:
