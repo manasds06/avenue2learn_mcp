@@ -21,9 +21,11 @@ import { chunkSegments, type ChunkContext } from "./chunk.js";
 import { assertModelMatches, embed, recordModel } from "./embed.js";
 import { extract, ExtractionError, isSupported } from "./extract.js";
 import {
+  countChunks,
   docKey,
   getDocument,
   hashBytes,
+  listDocuments,
   putDocument,
   type StoredChunk,
 } from "./store.js";
@@ -49,7 +51,11 @@ export interface SyncResult {
   files_indexed: number;
   files_skipped_unchanged: number;
   files_skipped_unsupported: number;
+  /** Chunks this run TRIED to write. Intent, not proof. */
   chunks_created: number;
+  /** Chunks actually readable back afterwards. The one that means something. */
+  chunks_in_index: number;
+  documents_in_index: number;
   errors: SyncError[];
   duration_seconds: number;
   note: string | null;
@@ -298,9 +304,29 @@ export async function syncCourse(
   }
 
   await recordModel();
+  report({ phase: "Verifying the index", done: topics.length, total: topics.length });
+
+  // READ BACK. chunks_created used to be the number of chunks we TRIED to
+  // write; a sync that lost every write still reported 128. Reporting intent
+  // as if it were fact is what made a later "0 results" impossible to
+  // attribute.
+  const storedChunks = await countChunks(orgUnitId);
+  const storedDocs = (await listDocuments(orgUnitId)).length;
+
   report({ phase: "Done", done: topics.length, total: topics.length });
 
   const notes: string[] = [];
+
+  // The check that would have caught a lost-write bug immediately, instead of
+  // it surfacing later as a confident "your course materials don't mention
+  // that".
+  if (indexed > 0 && storedChunks === 0) {
+    notes.push(
+      "WARNING: chunks were written but none can be read back. The index did " +
+        "not persist, so search will find nothing. That is a bug in this " +
+        "extension, not an empty course.",
+    );
+  }
   if (!complete) {
     notes.push(
       "Part of the content tree could not be read, so some files were never seen.",
@@ -348,6 +374,9 @@ export async function syncCourse(
     files_skipped_unchanged: unchanged,
     files_skipped_unsupported: unsupported,
     chunks_created: chunksCreated,
+    // What is actually readable now, across every sync of this course.
+    chunks_in_index: storedChunks,
+    documents_in_index: storedDocs,
     errors,
     duration_seconds: Math.round((performance.now() - started) / 100) / 10,
     note: notes.length ? notes.join(" ") : null,

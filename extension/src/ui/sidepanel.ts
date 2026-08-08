@@ -126,6 +126,25 @@ function renderText(el: HTMLElement, text: string): void {
   }
 }
 
+/**
+ * Compact argument summary for the trace.
+ *
+ * "search_course_materials — 0 items" is not diagnosable: it does not say
+ * whether the model scoped to a course, or to WHICH course. A zero-result
+ * search chasing an unindexed course is correct behaviour; the same line
+ * against an indexed one is a bug, and the two were indistinguishable for
+ * long enough to cost several wrong guesses.
+ */
+function summarizeArgs(args: Record<string, unknown>): string {
+  const parts = Object.entries(args)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .map(([k, v]) => {
+      const text = typeof v === "string" ? v : JSON.stringify(v);
+      return `${k}: ${text.length > 32 ? `${text.slice(0, 32)}…` : text}`;
+    });
+  return parts.length ? `(${parts.join(", ")})` : "()";
+}
+
 function renderTrace(el: HTMLElement, trace: ToolTrace[]): void {
   if (!trace.length) return;
   const details = document.createElement("details");
@@ -136,7 +155,7 @@ function renderTrace(el: HTMLElement, trace: ToolTrace[]): void {
   for (const t of trace) {
     const line = document.createElement("div");
     line.className = t.ok ? "trace-ok" : "trace-err";
-    line.textContent = `${t.ok ? "✓" : "✕"} ${t.name} — ${t.summary}`;
+    line.textContent = `${t.ok ? "✓" : "✕"} ${t.name}${summarizeArgs(t.args)} — ${t.summary}`;
     details.append(line);
   }
   el.append(details);
