@@ -4,7 +4,21 @@ Every Valence route this server depends on. Reference: [`docs.valence.desire2lea
 
 ## Conventions
 
-**Base URL.** `https://avenue.mcmaster.ca`
+**Base URL.** Per institution — there is no single one. The registry lives in
+[`avenue_mcp/institutions.py`](../src/avenue_mcp/institutions.py), and the two measured
+instances are:
+
+| Institution | Brightspace host | What the school calls it |
+|---|---|---|
+| McMaster | `https://avenue.cllmcmaster.ca` | Avenue to Learn |
+| Carleton | `https://brightspace.carleton.ca` | Brightspace |
+
+`avenue.mcmaster.ca` is **not** McMaster's Brightspace — it is a static landing page where
+every `/d2l/*` path 404s. It is the *login* entry point only, which is why host and login
+URL are separate fields. See [`08-api-probe-results.md`](08-api-probe-results.md).
+
+Every route below is relative to whichever host is in play; the routes themselves are
+identical across instances, and both run `lp 1.62` / `le 1.96`.
 
 **Path shape.** `/d2l/api/{component}/{version}/{resource}`
 
@@ -19,13 +33,25 @@ Every Valence route this server depends on. Reference: [`docs.valence.desire2lea
 
 | Marker | Meaning |
 |---|---|
-| ✅ **Verified** | Confirmed working on a McMaster student account during Phase 0 |
-| 🔵 **Expected** | Documented as learner-accessible; not yet probed |
+| ✅ **Verified** | Measured working on a student account **on the instance named in that column** |
+| ⛔ **Blocked** | Measured, and denied to students on that instance |
+| ⬜ **Unverified** | Nobody has reached it there. **Not** a synonym for blocked |
+| 🔵 **Expected** | Documented as learner-accessible; a prediction, not a measurement |
 | ⚠️ **Uncertain** | Docs mark it instructor-scope. May 403, may return a filtered view. **Must be probed.** |
-| ⛔ **Blocked** | Probed and denied to students |
 | 🔒 **Gated** | Write operation. Specced, not shipped in v1. |
 
-**Everything below is currently 🔵 or ⚠️.** Nothing is ✅ until Phase 0 runs. Results land in [`08-api-probe-results.md`](08-api-probe-results.md) and this table gets updated from them — not the other way around.
+**A marker is per instance, never global.** ✅ at Carleton says nothing about McMaster, and
+the summary table keeps a column each so the difference stays visible. Two instances have
+been probed ([`08`](08-api-probe-results.md) McMaster, [`09`](09-carleton-probe-results.md)
+Carleton); a third would arrive with every route ⬜.
+
+**The per-route `Status:` lines below are predictions** derived from the Valence docs, and
+they are deliberately left as written even where a measurement has since contradicted them
+— the gap between "documented instructor-scope" and "actually reachable" is itself a
+finding. What was *measured* lives in the [summary table](#summary-table) at the bottom.
+Where the two disagree, **the measurement wins**, and the flow is always
+probe → probe doc → this table → [`institutions.py`](../src/avenue_mcp/institutions.py),
+never the reverse.
 
 ---
 
