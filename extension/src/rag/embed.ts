@@ -46,13 +46,22 @@ function configure(): void {
   // The typings mark this readonly, but assigning it is the documented way
   // to point ORT at locally bundled WASM.
   const wasm = (env.backends.onnx as { wasm?: Record<string, unknown> }).wasm ?? {};
-  wasm["wasmPaths"] = chrome.runtime.getURL("vendor/ort/");
+
+  // EXPLICIT FILE PATHS, not a directory prefix.
+  //
+  // With a prefix, ORT picks a variant itself and asked for
+  // `ort-wasm-simd-threaded.asyncify.mjs` — the WebGPU build — which is not
+  // shipped, so every file failed with "no available backend found". The
+  // object form pins the plain CPU build we actually bundle, and a mismatch
+  // now surfaces at build time rather than as a 404 mid-sync.
+  wasm["wasmPaths"] = {
+    wasm: chrome.runtime.getURL("vendor/ort/ort-wasm-simd-threaded.wasm"),
+    mjs: chrome.runtime.getURL("vendor/ort/ort-wasm-simd-threaded.mjs"),
+  };
+
   // Single-threaded: SharedArrayBuffer needs cross-origin isolation headers
   // that an extension page does not have.
   wasm["numThreads"] = 1;
-  // Only the plain SIMD build is shipped (see build.mjs), so do not let ORT
-  // probe for the jsep/WebGPU variant we deliberately left out.
-  wasm["simd"] = true;
   wasm["proxy"] = false;
   (env.backends.onnx as { wasm?: unknown }).wasm = wasm;
 
@@ -78,6 +87,12 @@ async function getExtractor(
     onProgress?.("Loading the search model…");
 
     extractor = pipeline("feature-extraction", MODEL_ID, {
+      // CPU/WASM explicitly. Left on "auto", transformers.js asks for WebGPU,
+      // which is what made ORT reach for the asyncify build in the first
+      // place. An extension side panel is not the place to fight over GPU
+      // adapters, and a 384-dim model over a few hundred chunks is fast
+      // enough on CPU.
+      device: "wasm",
       dtype: "q8",
       local_files_only: true,
       progress_callback: (p: { status?: string; progress?: number }) => {

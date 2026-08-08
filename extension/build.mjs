@@ -5,19 +5,18 @@
  * plus one panel, and a heavier toolchain would add config to maintain without
  * doing anything this needs.
  *
- * Two sets of assets are copied rather than bundled:
+ * NOTHING is fetched at runtime. Three sets of assets are copied in:
  *
- *   - pdf.worker.mjs — pdf.js parses in a worker, and MV3 will not let us load
- *     that worker from a CDN. It has to sit inside the package.
- *   - onnxruntime-web's .wasm — same reason. Fetching WASM from a remote host
- *     would need both a CSP exemption and another host permission; shipping
- *     the ~10MB locally avoids both.
- *
- * Model WEIGHTS are the one thing still fetched at runtime (from HuggingFace),
- * because bundling them would add ~30MB to every extension update.
+ *   - pdf.worker.js — pdf.js parses in a worker, and MV3 will not load one
+ *     from a CDN. Named .js, not .mjs: Chrome serves extension files by
+ *     extension and rejects a module worker fetched from .mjs on MIME grounds.
+ *   - onnxruntime-web's .wasm + .mjs — the plain CPU build only. src/rag/embed
+ *     pins these by exact path, and this script fails if they drift apart.
+ *   - The embedding model (~33MB), fetched into vendor-model/ by
+ *     `npm run fetch-model` and kept out of git.
  */
 import * as esbuild from "esbuild";
-import { cp, mkdir, readdir, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 
 const watch = process.argv.includes("--watch");
@@ -76,13 +75,29 @@ async function copyStatic() {
   // here. If WebGPU is ever wanted, add jsep back deliberately and re-measure.
   const ortDist = "node_modules/onnxruntime-web/dist";
   const ORT_FILES = ["ort-wasm-simd-threaded.wasm", "ort-wasm-simd-threaded.mjs"];
-  if (existsSync(ortDist)) {
-    await mkdir(`${outdir}/vendor/ort`, { recursive: true });
-    const available = await readdir(ortDist);
-    for (const file of ORT_FILES) {
-      if (available.includes(file)) {
-        await cp(`${ortDist}/${file}`, `${outdir}/vendor/ort/${file}`);
-      }
+
+  await mkdir(`${outdir}/vendor/ort`, { recursive: true });
+  const available = existsSync(ortDist) ? await readdir(ortDist) : [];
+  for (const file of ORT_FILES) {
+    // FAIL THE BUILD on a missing runtime file. Skipping quietly produced a
+    // package that installed fine and then failed every single file at sync
+    // time with "no available backend found" — a build-time typo surfacing as
+    // a runtime mystery.
+    if (!available.includes(file)) {
+      throw new Error(
+        `onnxruntime-web is missing ${file}. Embeddings cannot work without it; ` +
+          `run npm install, or update ORT_FILES if the upstream filenames changed.`,
+      );
+    }
+    await cp(`${ortDist}/${file}`, `${outdir}/vendor/ort/${file}`);
+  }
+
+  // src/rag/embed.ts pins these by exact path, so a rename there without a
+  // change here is a 404 at load time. Keep them in step.
+  const embedSrc = await readFile("src/rag/embed.ts", "utf8");
+  for (const file of ORT_FILES) {
+    if (!embedSrc.includes(file)) {
+      throw new Error(`src/rag/embed.ts no longer references ${file}; wasmPaths is out of step.`);
     }
   }
 }
