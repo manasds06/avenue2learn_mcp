@@ -246,18 +246,20 @@ def _parse_xsrf(resp: httpx.Response) -> str | None:
 class OAuthAuth:
     """Documented, not implemented.
 
-    If McMaster ever registers an application and issues a client ID + secret,
-    this class gets written, config selects it, and the tool layer is untouched.
+    If your institution ever registers an application and issues a client ID +
+    secret, this class gets written, config selects it, and the tool layer is
+    untouched.
 
-    Note what does NOT work: registering your own Microsoft Entra app and
-    exchanging a MacID token for Brightspace access. Entra tokens are scoped to the
-    app that requested them; Brightspace has no trust relationship with your
-    registration and no endpoint that exchanges a third-party IdP token for a
-    Brightspace session. See docs/01-authentication.md.
+    Note what does NOT work: registering your own identity-provider app and
+    exchanging a personal SSO token for Brightspace access. IdP tokens are
+    scoped to the app that requested them; Brightspace has no trust
+    relationship with your registration and no endpoint that exchanges a
+    third-party IdP token for a Brightspace session. See
+    docs/01-authentication.md.
     """
 
     def __init__(self, *_: object, **__: object) -> None:
         raise NotImplementedError(
-            "OAuth requires a McMaster-registered application. See "
-            "docs/01-authentication.md."
+            "OAuth requires an application registered by your institution. "
+            "See docs/01-authentication.md."
         )

@@ -1,8 +1,9 @@
 """get_class_list -- instructor contacts, and honesty about the roster.
 
 Written for the RESTRICTED case on purpose. Full student rosters with email
-addresses are personal information under FIPPA, and McMaster is more likely to
-lock this down than less, so a 403 is the expected and correct outcome.
+addresses are personal information under privacy law, and an institution is
+more likely to lock this down than less, so a 403 is the expected and correct
+outcome.
 
 If Phase 0 finds rosters available, this widens. Writing it optimistically and
 narrowing later produces a tool that lies to the model until someone fixes it.
