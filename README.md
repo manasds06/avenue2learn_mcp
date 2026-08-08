@@ -11,7 +11,7 @@ Ask your assistant what's due this week, what the marking scheme actually says, 
 need on the final — and get answers grounded in your real course data instead of guesses.
 
 > **Status: implemented and probed against two live instances.**
-> All 17 read tools are built, the server runs over stdio, **352 tests pass**, and the RAG
+> All 17 read tools are built, the server runs over stdio, **358 tests pass**, and the RAG
 > pipeline is verified end-to-end with real local embeddings.
 >
 > **Phase 0's authenticated probe has run on both instances**, on real student accounts.
@@ -29,6 +29,15 @@ need on the final — and get answers grounded in your real course data instead 
 > permissions, which differ loudly. Shape. If you point this at a third instance, expect
 > the same class of problem, and see
 > [Next step](#next-step). Start at [`docs/00-overview.md`](docs/00-overview.md).
+>
+> **A fifth bug had a different lesson: the tests agreed with it.** `list_courses` read
+> `IsActive`/`StartDate`/`EndDate` off `OrgUnit`, but Valence puts them under `Access`, a
+> sibling — so every enrollment looked current and the term filter did nothing (43 courses
+> back to Fall 2024). It broke on *both* instances, so the second school never exposed it,
+> and the mock nested the fields the same wrong way, so a green suite proved nothing. What
+> caught it was reading real tool output. A fixture is a hypothesis about the API; when it
+> is copied from the code's assumptions rather than the vendor's schema, it tests only
+> self-consistency.
 
 ---
 
@@ -141,7 +150,7 @@ attributed to "Instructor" without a name.
 | [`06-roadmap.md`](docs/06-roadmap.md) | Phases and exit criteria |
 | [`07-risks-and-policy.md`](docs/07-risks-and-policy.md) | Academic integrity, ToS, data handling |
 | [`08-api-probe-results.md`](docs/08-api-probe-results.md) | Phase 0 findings — **McMaster** |
-| [`09-carleton-probe-results.md`](docs/09-carleton-probe-results.md) | Phase 0 findings — **Carleton**, and the four silent shape bugs |
+| [`09-carleton-probe-results.md`](docs/09-carleton-probe-results.md) | Phase 0 findings — **Carleton**, and the five silent bugs it exposed |
 
 Kept as two probe documents on purpose. One file holding two instances' results is exactly
 where "measured at McMaster" leaks into a Carleton conclusion.
@@ -216,7 +225,7 @@ your platform if you skip it. PDF rendering needs nothing extra.
 ### Verifying
 
 ```bash
-.venv/bin/python -m pytest -q                   # 352 tests, no network
+.venv/bin/python -m pytest -q                   # 358 tests, no network
 .venv/bin/python scripts/probe_unauth.py        # live probe, no login needed
 .venv/bin/python scripts/smoke_login_chain.py   # login flow up to the password box
 .venv/bin/python scripts/smoke_server.py        # server over real stdio
@@ -263,11 +272,18 @@ validating the cookie-session premise by pointing an existing third-party D2L MC
 Avenue. It was never run, and it has been superseded: our own authenticated probe answered
 the same question directly, and cookies work. Recorded here rather than quietly ticked.
 
-**Probe a third school for *shape*, not just access.** The four bugs found so far were all
-shape, all silent, and all invisible to the permission axis. A new instance should be
+**Probe a third school for *shape*, not just access.** Four of the five bugs found so far
+were shape, all silent, and all invisible to the permission axis. A new instance should be
 checked for what its payloads *look like* — does the content listing carry `Url`, do posts
 carry a role — as a first-class step, not a follow-up. Its measured results then go into
 `institutions.py`, and never anywhere else.
+
+**Check fixtures against the vendor schema, not the code.** The fifth bug was neither
+permissions nor per-instance shape: `list_courses` read three fields off the wrong object,
+and the mock made the same mistake, so a green suite proved only self-consistency. Any
+fixture field worth asserting on is worth confirming against
+[`docs.valence.desire2learn.com`](https://docs.valence.desire2learn.com/) or a captured
+response. Reading real tool output is the cheapest way to find the ones already wrong.
 
 **Known cosmetic issue, deliberately unfixed.** `sync_course_materials` reports quiz-launcher
 URLs as "unsupported file type", which is misleading — they aren't files at all. The counts

@@ -57,6 +57,15 @@ def enrollment_org_unit(entry: Any) -> dict[str, Any] | None:
     return ou if isinstance(ou, dict) else entry
 
 
+def enrollment_access(entry: Any) -> dict[str, Any]:
+    """myenrollments entries carry IsActive/StartDate/EndDate under 'Access',
+    a sibling of 'OrgUnit' -- not a property of the org unit itself."""
+    if not isinstance(entry, dict):
+        return {}
+    access = entry.get("Access")
+    return access if isinstance(access, dict) else {}
+
+
 def is_course_offering(org_unit: dict[str, Any]) -> bool:
     """Filter out departments and semester containers.
 

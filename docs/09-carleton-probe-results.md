@@ -119,6 +119,37 @@ cover: the user is told to log in again against a wall that does not exist.
 `Content-Disposition`. A real download carries `attachment; filename="…"`; a login page does
 not. JSON routes keep the strict rule — HTML there is still a wall.
 
+## Fifth finding: the enrollment filter never ran, and the tests agreed with it
+
+`list_courses` returned **43 courses back to Fall 2024** with `include_inactive=false`, all
+`is_active: true` with null dates. `IsActive`/`StartDate`/`EndDate` live under **`Access`**,
+a sibling of `OrgUnit`, and the code read them off `OrgUnit`. They were always `None`, so
+the date fallback treated every enrollment as current and the term filter did nothing.
+
+Two things make this different from the four findings above:
+
+- **It broke on both instances.** Adding a second school did not expose it, because it was
+  never a per-institution shape difference — just a misread of the vendor schema.
+- **The suite passed anyway.** The mock nested the fields the same wrong way the code read
+  them, so 352 green tests confirmed only that the code agreed with itself. A fixture is a
+  hypothesis about the API; copied from the implementation instead of the schema, it tests
+  nothing. It was live tool output that caught this, not the tests.
+
+**A flag fix alone was not enough.** Carleton reports `IsActive: true` for **every** course
+it returns, including long-finished terms, and supplies **no term dates for 12 of the 13**
+currently-open shells. So:
+
+- `IsActive: true` is not evidence a course is current — only `false` is decisive.
+- The **date window** does the real filtering: the 30 courses dropped had past `EndDate`s.
+- **No dates must mean "current," not "hidden."** Twelve legitimately open shells carry no
+  dates at all; hiding them would be the same bug in the other direction.
+
+**Fix:** `enrollment_access()` reads the `Access` sibling, and a course is current when the
+flag is not `false` **and** `now` is inside the window, treating absent dates as current.
+Verified against the live account: 43 → 13, and the 13 were confirmed correct by the
+account holder. Regression tests cover a past course, a past course D2L still flags active,
+and the `Access`-vs-`OrgUnit` read; all fail against the old code.
+
 ## Authentication
 
 The login flow needed **no changes**. `auth/login.py` codes no form selectors, so Carleton's
@@ -149,7 +180,7 @@ Field names are listed where the response shape matters. No values are recorded.
 |---|---|---|
 | `versions/` | ✅ | `lp 1.62`, `le 1.96` |
 | `users/whoami` | ✅ | `{FirstName, Identifier, LastName, ProfileIdentifier, Pronouns, UniqueName}` |
-| `enrollments/myenrollments/` | ✅ | Non-empty; paging works |
+| `enrollments/myenrollments/` | ✅ | Non-empty; paging works. `IsActive`/`StartDate`/`EndDate` are under **`Access`**, a sibling of `OrgUnit` — see below |
 | **`courses/{id}`** | ⛔ **403** | Blocked, same as McMaster. Course names come from `myenrollments`. |
 | `content/root/` | ✅ | Non-empty module tree, but **no `Url` on topics** — see second finding |
 | `content/modules/{id}/structure/` | ✅ | Same omission |

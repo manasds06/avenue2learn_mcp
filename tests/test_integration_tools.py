@@ -74,6 +74,9 @@ WHOAMI = {
     "UniqueName": "student1",
 }
 
+# Access is a SIBLING of OrgUnit and carries IsActive/StartDate/EndDate. Nesting
+# them inside OrgUnit (as an earlier fixture did) makes every course read as
+# active with no dates, and hides that from the tests.
 ENROLLMENTS = {
     "PagingInfo": {"Bookmark": None, "HasMoreItems": False},
     "Items": [
@@ -83,16 +86,47 @@ ENROLLMENTS = {
                 "Name": COURSE,
                 "Code": "COMPSCI-2C03-C01-202601",
                 "Type": {"Id": 3, "Code": "CourseOffering", "Name": "Course Offering"},
+            },
+            "Access": {
+                "IsActive": True,
                 "StartDate": "2026-01-05T05:00:00.000Z",
                 "EndDate": "2026-12-30T05:00:00.000Z",
-            }
+            },
+        },
+        {  # past term -- must be filtered out unless include_inactive
+            "OrgUnit": {
+                "Id": 4242,
+                "Name": "BIOL1902 Natural History (LEC) Fall 2024",
+                "Code": "BIOL1902-202430",
+                "Type": {"Id": 3, "Code": "CourseOffering", "Name": "Course Offering"},
+            },
+            "Access": {
+                "IsActive": False,
+                "StartDate": "2024-09-03T04:00:00.000Z",
+                "EndDate": "2024-12-20T05:00:00.000Z",
+            },
+        },
+        {  # past term that D2L STILL reports as active -- the common real case.
+            # Filtering on IsActive alone lets this through.
+            "OrgUnit": {
+                "Id": 4243,
+                "Name": "ECOR1045 Statics (LEC) Fall 2024",
+                "Code": "ECOR1045-202430",
+                "Type": {"Id": 3, "Code": "CourseOffering", "Name": "Course Offering"},
+            },
+            "Access": {
+                "IsActive": True,
+                "StartDate": "2024-09-03T04:00:00.000Z",
+                "EndDate": "2024-12-20T05:00:00.000Z",
+            },
         },
         {  # must be filtered out -- not a course
             "OrgUnit": {
                 "Id": 5,
                 "Name": "Faculty of Engineering",
                 "Type": {"Id": 7, "Code": "Department", "Name": "Department"},
-            }
+            },
+            "Access": {"IsActive": True},
         },
     ],
 }
@@ -122,14 +156,36 @@ CONTENT_ROOT = [
     }
 ]
 
+# The leftover scratch folder that answers 200 [] on mysubmissions while every
+# real folder 403s. Named so its role is obvious at the call site.
+STRAY_FOLDER = 779
+
+# Every (method, path) the mock transport saw. Read-only is a claim the README
+# makes to users about their own coursework, so it is asserted against actual
+# traffic rather than trusted to code review.
+METHOD_LOG: list[tuple[str, str]] = []
+
+# Points live at Assessment.ScoreDenominator and instructions at
+# CustomInstructions (a RichText). Valence has no top-level OutOf/Instructions;
+# a fixture using those names passes against code that reads them and hides that
+# every real folder returns null for both.
 DROPBOX_FOLDERS = [
     {
         "Id": 778,
         "Name": "Assignment 3 - Graph Algorithms",
         "DueDate": A3_DUE_UTC,
-        "OutOf": 100.0,
-        "Instructions": {"Html": "<p>Implement <b>Dijkstra's</b> algorithm.</p>"},
-    }
+        "Assessment": {"ScoreDenominator": 100.0},
+        "CustomInstructions": {
+            "Text": "Implement Dijkstra's algorithm.",
+            "Html": "<p>Implement <b>Dijkstra's</b> algorithm.</p>",
+        },
+    },
+    {
+        "Id": STRAY_FOLDER,
+        "Name": "temp",
+        "DueDate": A3_DUE_UTC,
+        "Assessment": {"ScoreDenominator": 10.0},
+    },
 ]
 
 MYSUBMISSIONS = [
@@ -294,11 +350,23 @@ CLASSLIST_CARLETON = [
 ]
 
 
-def build_transport(restricted: bool, shape: str = "mcmaster") -> httpx.MockTransport:
+def build_transport(
+    restricted: bool, shape: str = "mcmaster", deny_personal: bool = False
+) -> httpx.MockTransport:
     """Route Valence paths to canned payloads.
 
     `restricted=True` makes the instructor-scope routes 403 with an HTML body,
     matching what the live host returns for a request it will not serve.
+
+    `deny_personal=True` models what BOTH real instances measurably do and
+    neither world above covered: the *listing* routes (`dropbox/folders/`,
+    `quizzes/`) are permitted while the routes carrying the caller's own
+    per-item record (`mysubmissions`, `quizzes/{id}/attempts/`) 403.
+
+    "restricted" denies the listing outright, so the code path that reads a
+    listing and then fails to read its personal detail never ran. Three bugs
+    lived in exactly that gap, each one reporting a denial as a fact about the
+    student: "not submitted", "not attempted".
     """
 
     def ok(payload) -> httpx.Response:
@@ -316,6 +384,7 @@ def build_transport(restricted: bool, shape: str = "mcmaster") -> httpx.MockTran
     mcmaster = shape == "mcmaster"
 
     def handler(request: httpx.Request) -> httpx.Response:
+        METHOD_LOG.append((request.method, request.url.path))
         p = request.url.path
 
         if p == "/d2l/api/versions/":
@@ -345,6 +414,10 @@ def build_transport(restricted: bool, shape: str = "mcmaster") -> httpx.MockTran
                  "Url": "/content/enforced/111/2C03_outline_W26.pdf"}
             )
         if "/dropbox/folders/" in p and p.endswith("/mysubmissions/"):
+            if deny_personal:
+                # Carleton has one stray folder that answers 200 [] while every
+                # real one 403s -- the false positive docs/09 warns about.
+                return ok([]) if f"/{STRAY_FOLDER}/" in p else denied()
             return ok(MYSUBMISSIONS)
         if "/dropbox/folders/" in p and "/feedback/" in p:
             return ok({"Score": 92.0, "Feedback": {"Html": "<p>Good.</p>"}, "IsGraded": True})
@@ -359,6 +432,8 @@ def build_transport(restricted: bool, shape: str = "mcmaster") -> httpx.MockTran
         if "calendar/events/myEvents" in p:
             return ok(CALENDAR)
         if "/quizzes/" in p and p.endswith("/attempts/"):
+            if deny_personal:
+                return denied()
             return denied() if restricted else ok([])
         if p.endswith("/quizzes/"):
             return denied() if restricted else ok(QUIZZES)
@@ -416,6 +491,36 @@ def ctx(request, tmp_path, monkeypatch):
 
 async def _always_true() -> bool:
     return True
+
+
+@pytest.fixture
+def denied_subs_ctx(tmp_path, monkeypatch):
+    """Listings readable, per-student detail denied -- what BOTH instances do.
+
+    `dropbox/folders/` and `quizzes/` answer; `mysubmissions` and
+    `quizzes/{id}/attempts/` 403. Neither `ctx` world covered this, and every
+    bug that lived here reported a denial as a fact about the student.
+    """
+    monkeypatch.setenv("AVENUE_MCP_STATE_DIR", str(tmp_path / "state"))
+    from avenue_mcp.config import get_settings
+
+    get_settings.cache_clear()
+
+    c = AppContext()
+    c.settings.session_path.parent.mkdir(parents=True, exist_ok=True)
+    c.settings.session_path.write_text(
+        json.dumps({"cookies": [{"name": "d2lSessionVal", "value": "x",
+                                 "domain": "avenue.cllmcmaster.ca", "path": "/"}],
+                    "origins": []}),
+        encoding="utf-8",
+    )
+    c.auth._client = httpx.AsyncClient(
+        base_url=c.settings.base_url,
+        transport=build_transport(False, deny_personal=True),
+    )
+    monkeypatch.setattr(c.auth, "is_alive", _always_true)
+    yield c
+    get_settings.cache_clear()
 
 
 @pytest.fixture(params=["mcmaster", "carleton"])
@@ -550,6 +655,37 @@ class TestCourses:
         assert out["courses"][0]["org_unit_id"] == ORG
         assert out["courses"][0]["name"] == COURSE
 
+    async def test_reads_active_and_dates_from_access_not_org_unit(self, ctx):
+        from avenue_mcp.tools.courses import list_courses
+
+        out = await list_courses(ctx)
+        course = out["courses"][0]
+        assert course["is_active"] is True
+        # Nulls here mean the dates were read off OrgUnit, where they do not live.
+        assert course["start_date"]["utc"], "StartDate must come from Access"
+        assert course["end_date"]["utc"], "EndDate must come from Access"
+
+    async def test_past_term_hidden_unless_include_inactive(self, ctx):
+        from avenue_mcp.tools.courses import list_courses
+
+        assert 4242 not in {c["org_unit_id"] for c in (await list_courses(ctx))["courses"]}
+
+        out = await list_courses(ctx, include_inactive=True)
+        past = next(c for c in out["courses"] if c["org_unit_id"] == 4242)
+        assert past["is_active"] is False
+
+    async def test_past_term_hidden_even_when_d2l_still_flags_it_active(self, ctx):
+        """D2L leaves past shells IsActive=true; the date window must still win."""
+        from avenue_mcp.tools.courses import list_courses
+
+        out = await list_courses(ctx)
+        assert 4243 not in {c["org_unit_id"] for c in out["courses"]}
+        assert out["count"] == 1, "only the current-term offering should remain"
+
+        full = await list_courses(ctx, include_inactive=True)
+        stale = next(c for c in full["courses"] if c["org_unit_id"] == 4243)
+        assert stale["is_active"] is False
+
     async def test_version_negotiation_used_real_versions(self, ctx):
         from avenue_mcp.tools.courses import list_courses
 
@@ -604,6 +740,90 @@ class TestAssignments:
             assert a["points_possible"] == 100.0
             assert "Dijkstra" in a["instructions_text"]
             assert a["submission_status"] == "submitted"
+
+    async def test_points_and_instructions_read_valence_field_names(self, ctx):
+        """Points are Assessment.ScoreDenominator; instructions CustomInstructions.
+
+        Valence has no top-level OutOf/Instructions, so reading those returns
+        null for every folder on every instance -- silently, and forever.
+        """
+        from avenue_mcp.tools.assignments import list_assignments
+
+        if ctx.restricted:
+            pytest.skip("folder listing denied in this world")
+        out = await list_assignments(ctx, ORG)
+        a3 = next(a for a in out["assignments"] if "Assignment 3" in a["name"])
+        assert a3["points_possible"] == 100.0
+        assert a3["instructions_text"] and "Dijkstra" in a3["instructions_text"]
+
+    async def test_denied_submissions_never_reported_as_submitted(
+        self, denied_subs_ctx
+    ):
+        """A denied route must not delete a deadline.
+
+        `_Unavailable` is a plain object and therefore truthy, so `if sub`
+        marked unreadable items "submitted" -- and the default view, which hides
+        submitted work, then dropped them entirely.
+        """
+        from avenue_mcp.tools.assignments import get_upcoming_deadlines
+
+        out = await get_upcoming_deadlines(denied_subs_ctx, days_ahead=30)
+        titles = {d["title"] for d in out["deadlines"]}
+        assert "Assignment 3 - Graph Algorithms" in titles, (
+            "an assignment whose status cannot be read must still be shown"
+        )
+        for d in out["deadlines"]:
+            assert d["submission_status"] != "submitted"
+
+    async def test_denied_submissions_not_advertised_as_available(
+        self, denied_subs_ctx
+    ):
+        """submission_status_available tracks the SUBMISSIONS route.
+
+        Setting it from a successful folder read claims status is available on
+        an instance where every mysubmissions call 403s -- and contradicts what
+        list_assignments reports for the same course.
+        """
+        from avenue_mcp.tools.assignments import (
+            get_upcoming_deadlines,
+            list_assignments,
+        )
+
+        deadlines = await get_upcoming_deadlines(denied_subs_ctx, days_ahead=30)
+        listing = await list_assignments(denied_subs_ctx, ORG)
+
+        assert deadlines["submission_status_available"] is False
+        assert listing["submission_status_available"] is False
+        assert deadlines["note"]
+
+    async def test_stray_200_folder_does_not_assert_not_submitted(
+        self, denied_subs_ctx
+    ):
+        """One folder answering 200 [] is not evidence of "nothing submitted"
+        once another has refused -- and the note claims everything is unknown."""
+        from avenue_mcp.tools.assignments import list_assignments
+
+        out = await list_assignments(denied_subs_ctx, ORG)
+        statuses = {a["submission_status"] for a in out["assignments"]}
+        assert statuses == {"unknown"}, (
+            f"note promises all-unknown, got {statuses}"
+        )
+
+    async def test_deadlines_issue_only_get_requests(self, ctx):
+        """get_upcoming_deadlines must never write.
+
+        It is the widest-fanning read tool -- it walks every active course and
+        every dropbox folder -- so if any read path were to mutate, this is
+        where it would show up. Asserted against real traffic.
+        """
+        from avenue_mcp.tools.assignments import get_upcoming_deadlines
+
+        METHOD_LOG.clear()
+        await get_upcoming_deadlines(ctx, days_ahead=30, include_submitted=True)
+
+        assert METHOD_LOG, "expected the tool to have made requests"
+        offenders = [(mth, path) for mth, path in METHOD_LOG if mth != "GET"]
+        assert not offenders, f"non-GET traffic from a read tool: {offenders}"
 
     async def test_deadline_renders_in_eastern_not_utc(self, ctx):
         """An 11:59 PM Eastern deadline is 03:59Z/04:59Z the NEXT day.
@@ -714,6 +934,26 @@ class TestQuizzes:
             assert q["start_date"]["utc"] and q["due_date"]["utc"] and q["end_date"]["utc"]
             assert q["attempts_allowed"] == 2
 
+    async def test_denied_attempts_never_reported_as_not_attempted(
+        self, denied_subs_ctx
+    ):
+        """A denied attempts route means UNKNOWN, not zero attempts.
+
+        `(attempts_used or 0) > 0` collapses None into 0, so every quiz claimed
+        "not_attempted" -- including a midterm the student demonstrably wrote,
+        since the grade for it exists.
+        """
+        from avenue_mcp.tools.quizzes import list_quizzes
+
+        out = await list_quizzes(denied_subs_ctx, ORG)
+        assert out["quizzes"], "the quiz listing itself is permitted here"
+        assert out["attempt_status_available"] is False
+        for q in out["quizzes"]:
+            assert q["status"] == "unknown", (
+                f"{q['name']} claims {q['status']} on a denied attempts route"
+            )
+        assert "not available" in out["note"].lower()
+
     async def test_never_exposes_questions(self, ctx):
         """Metadata only. Checked field-by-field, not by substring over the whole
         payload -- the tool's own `note` says "questions and answers are never
@@ -810,6 +1050,31 @@ class TestWhatsNew:
 
         threads = [d["topic_name"] for d in out["changes"]["discussion_replies"]]
         assert "A3 clarifications" in threads
+
+    async def test_explicit_since_does_not_dump_the_gradebook(self, ctx):
+        """An explicit `since` must not turn every grade into a "new" grade.
+
+        Grades carry no "graded at" timestamp, so a time window cannot filter
+        them; the watermark is the only mechanism. The old guard keyed off
+        `mark`, which `since` always populates, so "what's new in the last 60
+        days" reported every graded item in every course -- including terms two
+        years old, presented as recent.
+        """
+        from avenue_mcp.tools.whatsnew import get_whats_new
+
+        out = await get_whats_new(ctx, since="2026-06-08T00:00:00Z")
+        assert out["changes"]["new_grades"] == [], (
+            "first look at a course must seed watermarks, not report the "
+            "whole gradebook as new"
+        )
+
+    async def test_grade_change_still_reported_after_seeding(self, ctx):
+        """The seeding guard must not swallow real changes on later runs."""
+        from avenue_mcp.tools.whatsnew import get_whats_new
+
+        await get_whats_new(ctx)  # seeds
+        out = await get_whats_new(ctx, since="2026-06-08T00:00:00Z")
+        assert out["changes"]["new_grades"] == [], "nothing changed between runs"
 
     async def test_peek_is_repeatable(self, ctx):
         """mark_seen=False twice must give the same answer -- the documented

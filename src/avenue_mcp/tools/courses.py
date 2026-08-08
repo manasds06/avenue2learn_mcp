@@ -37,20 +37,23 @@ async def list_courses(ctx: AppContext, include_inactive: bool = False) -> dict[
             continue
         seen.add(oid)
 
-        start = parse_d2l(m.pick(org_unit, "StartDate"))
-        end = parse_d2l(m.pick(org_unit, "EndDate"))
-        active = m.pick(org_unit, "IsActive")
-
+        access = m.enrollment_access(entry)
+        start = parse_d2l(m.pick(access, "StartDate") or m.pick(org_unit, "StartDate"))
+        end = parse_d2l(m.pick(access, "EndDate") or m.pick(org_unit, "EndDate"))
+        active = m.pick(access, "IsActive")
         if active is None:
-            # No explicit flag: fall back to the date window, and treat a course
-            # with no dates as current rather than hiding it.
-            is_active = True
-            if end is not None and end < now:
-                is_active = False
-            if start is not None and start > now:
-                is_active = False
-        else:
-            is_active = bool(active)
+            active = m.pick(org_unit, "IsActive")
+
+        # Both signals must agree, because neither is sufficient alone. An
+        # explicit IsActive=False is decisive. But IsActive=True is NOT: D2L
+        # leaves past-term shells active for years, so trusting the flag on its
+        # own returns every course a student has ever taken. A course with no
+        # dates at all is treated as current rather than hidden.
+        is_active = active is not False
+        if end is not None and end < now:
+            is_active = False
+        if start is not None and start > now:
+            is_active = False
 
         record = {
             **base,
