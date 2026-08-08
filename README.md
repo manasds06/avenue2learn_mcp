@@ -79,6 +79,29 @@ The reason is simple: **a submission cannot be undone.** Every read operation ca
 
 There is exactly one write operation ever contemplated — submitting your own file to your own assignment, with an optional comment attached. Deliberately absent, permanently: posting to discussions, retrieving quiz questions, anything instructor-side.
 
+## Two clients, one set of tools
+
+This repo now holds two implementations of the same 17 tools, for two different
+users:
+
+| | **Python MCP server** (`src/`) | **Browser extension** (`extension/`) |
+|---|---|---|
+| Runs as | An MCP server under Claude Code | A Chrome extension, in your browser |
+| Auth | Playwright login → `session.json` | Your existing Brightspace session |
+| LLM | Whatever your MCP client uses | Gemini, with your own key |
+| For | You | Someone you hand it to |
+
+They are kept honest by `extension/tests/parity.test.ts`, which reads the Python
+source and fails if a tool exists on one side only, or if one of the honesty
+rules — three-state submission status, the withheld roster, the refused grade
+projection — was lost in translation.
+
+The extension exists because a plain web app **cannot** work: Brightspace's
+session cookies are `HttpOnly`, so no page's JavaScript can read them, and CORS
+blocks reading the response even when the browser sends them. An extension is
+exempt from CORS for granted hosts and never has to touch the cookie at all.
+See [`extension/README.md`](extension/README.md).
+
 ## Documentation
 
 | Doc | Contents |

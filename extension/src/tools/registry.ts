@@ -26,6 +26,7 @@ import {
 } from "./materials.js";
 import { listQuizzes } from "./quizzes.js";
 import { getStatus } from "./status.js";
+import { getWhatsNew } from "./whatsnew.js";
 
 export interface JsonSchema {
   type: "object";
@@ -315,6 +316,32 @@ export const TOOLS: ToolDef[] = [
       required: ["org_unit_id", "topic_id", "page"],
     },
     handler: (a) => getPageImage(a as never),
+  },
+  {
+    name: "get_whats_new",
+    description:
+      "Digest of what has changed across the user's courses since they last checked — new announcements, new files, newly released grades, and what is coming up. Read-only. " +
+      "Use for 'what did I miss?', 'catch me up', or 'anything new?'. " +
+      "It remembers a per-course watermark, so a second call reports only what is newer. Pass mark_seen: false to peek WITHOUT advancing it. " +
+      "If `complete` is false, some sources could not be read: say the digest is partial rather than implying nothing else happened.",
+    parameters: {
+      type: "object",
+      properties: {
+        since: {
+          type: "string",
+          description: "ISO date to use instead of the stored watermark.",
+        },
+        mark_seen: {
+          type: "boolean",
+          description: "Advance the watermark. Defaults to true; pass false to peek.",
+        },
+        org_unit_id: {
+          type: "integer",
+          description: "Limit to one course. Omit for all active courses.",
+        },
+      },
+    },
+    handler: (a) => getWhatsNew(a as never),
   },
   {
     name: "get_status",
