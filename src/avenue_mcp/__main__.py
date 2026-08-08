@@ -14,6 +14,7 @@ import logging
 import sys
 
 from avenue_mcp.config import get_settings
+from avenue_mcp.util.logging import cap_third_party_loggers
 
 
 def _setup_logging(level: str) -> None:
@@ -22,6 +23,9 @@ def _setup_logging(level: str) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,  # stdout is the MCP transport
     )
+    # Must come after basicConfig: our level may be DEBUG, and at DEBUG httpcore
+    # logs every response header -- including Set-Cookie. See util/logging.py.
+    cap_third_party_loggers()
 
 
 def cmd_serve(_: argparse.Namespace) -> int:
