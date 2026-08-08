@@ -361,3 +361,41 @@ export const TOOLS_WITH_PLACEMENT = TOOLS.map((t) => ({
 export const TOOLS_BY_NAME: Record<string, ToolDef> = Object.fromEntries(
   TOOLS.map((t) => [t.name, t]),
 );
+
+/**
+ * Coerce model-supplied arguments to the types the schema declares.
+ *
+ * An LLM returning JSON will sometimes hand back `"759806"` where the schema
+ * says integer. Most code survives that; IndexedDB does not. Its key equality
+ * is TYPE-STRICT, so an index lookup with a string org_unit_id matches ZERO
+ * rows — and a search over a fully populated index returns "nothing found",
+ * which reads as "your course materials don't mention that".
+ *
+ * Done once here rather than defensively in seventeen handlers, and only where
+ * the schema says what the type should be — this coerces, it does not guess.
+ */
+export function coerceArgs(
+  tool: ToolDef,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...args };
+
+  for (const [key, spec] of Object.entries(tool.parameters.properties ?? {})) {
+    const value = out[key];
+    if (value === undefined || value === null || value === "") continue;
+
+    if (spec.type === "integer" || spec.type === "number") {
+      const n = typeof value === "number" ? value : Number(String(value).trim());
+      // Leave an unparseable value alone so the handler reports something
+      // meaningful rather than operating on NaN.
+      if (Number.isFinite(n)) out[key] = spec.type === "integer" ? Math.trunc(n) : n;
+    } else if (spec.type === "boolean" && typeof value !== "boolean") {
+      const s = String(value).trim().toLowerCase();
+      if (s === "true" || s === "false") out[key] = s === "true";
+    } else if (spec.type === "string" && typeof value !== "string") {
+      out[key] = String(value);
+    }
+  }
+
+  return out;
+}

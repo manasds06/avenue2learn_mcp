@@ -33,7 +33,7 @@ import {
   setModel,
 } from "../settings.js";
 import { setSyncProgressSink } from "../tools/materials.js";
-import { PANEL_TOOLS, TOOLS, TOOLS_BY_NAME } from "../tools/registry.js";
+import { PANEL_TOOLS, TOOLS, TOOLS_BY_NAME, coerceArgs } from "../tools/registry.js";
 
 const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 
@@ -81,7 +81,7 @@ const callTool: CallTool = async (name, args) => {
     return { ok: false, error: "UnknownTool", message: `No tool named ${name}.` };
   }
   try {
-    return { ok: true, result: await tool.handler(args) };
+    return { ok: true, result: await tool.handler(coerceArgs(tool, args)) };
   } catch (err) {
     if (err instanceof AvenueError) return { ok: false, ...err.toResult() };
     console.error("panel tool failed", name, err);

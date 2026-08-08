@@ -28,7 +28,7 @@ export async function runTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolResponse> {
-  const { TOOLS_BY_NAME, PANEL_TOOLS } = await import("../tools/registry.js");
+  const { TOOLS_BY_NAME, PANEL_TOOLS, coerceArgs } = await import("../tools/registry.js");
 
   if (PANEL_TOOLS.has(name)) {
     return {
@@ -50,7 +50,7 @@ export async function runTool(
   }
 
   try {
-    return { ok: true, result: await tool.handler(args) };
+    return { ok: true, result: await tool.handler(coerceArgs(tool, args)) };
   } catch (err) {
     if (err instanceof AvenueError) {
       // Typed errors carry their own next step, which is the whole point: the
