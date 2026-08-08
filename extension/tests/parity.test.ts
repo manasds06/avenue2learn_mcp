@@ -127,3 +127,28 @@ describe("facts measured against the live instance are carried over", () => {
     expect(ts("tools/content.ts")).toContain("FILE_TOPIC_TYPES");
   });
 });
+
+describe("failures are not cached as facts", () => {
+  it("courseName does not persist an empty result", () => {
+    const source = ts("tools/context.ts");
+    // Storing an empty Map on failure turned one transient error into a
+    // permanent "Course 759806" — including in the chunk headers of
+    // everything indexed afterwards, which is the cross-course guard.
+    expect(source).toContain("if (courses.length)");
+    expect(source).toContain("isPlaceholderName");
+  });
+
+  it("sync reports a placeholder name rather than burying it", () => {
+    const source = ts("rag/sync.ts");
+    expect(source).toContain("isPlaceholderName(name)");
+    expect(source).toMatch(/course name could not be resolved/i);
+  });
+
+  it("model suggestions come from the key, not a hardcoded guess", () => {
+    const source = ts("llm/gemini.ts");
+    // Offering a model the account lacks turns "rate-limited" into
+    // "rate-limited AND the suggested fix errors".
+    expect(source).toContain("availableModels");
+    expect(ts("ui/sidepanel.ts")).toContain("refreshModelSuggestions");
+  });
+});

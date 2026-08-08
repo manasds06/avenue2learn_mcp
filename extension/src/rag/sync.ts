@@ -16,7 +16,7 @@ import { avenue } from "../avenue/client.js";
 import { AvenueError } from "../avenue/errors.js";
 import { asInt, isObj, pick } from "../avenue/models.js";
 import { getCourseContent } from "../tools/content.js";
-import { courseName } from "../tools/context.js";
+import { courseName, isPlaceholderName } from "../tools/context.js";
 import { chunkSegments, type ChunkContext } from "./chunk.js";
 import { assertModelMatches, embed, recordModel } from "./embed.js";
 import { extract, ExtractionError, isSupported } from "./extract.js";
@@ -171,7 +171,13 @@ export async function syncCourse(
   // Refuse before doing work if the index was built by a different model.
   await assertModelMatches();
 
-  const name = await courseName(orgUnitId);
+  // Resolved BEFORE anything is indexed, and retried once: this name is
+  // written into every chunk's context header, so getting it wrong silently
+  // weakens retrieval scoping for the whole course.
+  let name = await courseName(orgUnitId);
+  if (isPlaceholderName(name)) {
+    name = await courseName(orgUnitId);
+  }
   report({ phase: "Reading the course content tree", done: 0, total: 1 });
 
   const { topics, complete } = await discover(orgUnitId);
@@ -317,6 +323,13 @@ export async function syncCourse(
       examples: files.slice(0, 3),
     }));
 
+  if (isPlaceholderName(name)) {
+    notes.push(
+      "The course name could not be resolved, so citations and chunk headers " +
+        "show its id instead. Search still works; re-sync once list_courses is " +
+        "reachable to restore the name.",
+    );
+  }
   if (errors.length) {
     const top = grouped[0]!;
     notes.push(

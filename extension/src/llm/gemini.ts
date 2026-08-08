@@ -46,13 +46,35 @@ const API_ROOT = "https://generativelanguage.googleapis.com/v1beta";
  */
 export const DEFAULT_MODEL = "gemini-2.5-flash";
 
-/** Offered in the panel. Free-tier limits vary a lot between these. */
+/**
+ * Fallback suggestions, used only before the real list has been fetched.
+ *
+ * A hardcoded list is a guess about someone else's account: the first version
+ * offered gemini-2.5-flash-lite, which this key does not have, so the
+ * suggestion sent the user straight into a "not available" error while looking
+ * for a way out of a quota one. availableModels() asks the key itself.
+ */
 export const MODEL_CHOICES = [
-  { id: "gemini-2.5-flash-lite", label: "2.5 Flash Lite — cheapest, highest free limits" },
-  { id: "gemini-2.5-flash", label: "2.5 Flash — balanced (default)" },
-  { id: "gemini-2.0-flash", label: "2.0 Flash — older, separate quota" },
-  { id: "gemini-2.5-pro", label: "2.5 Pro — best reasoning, lowest free limits" },
+  { id: "gemini-2.5-flash", label: "2.5 Flash — balanced" },
+  { id: "gemini-2.0-flash", label: "2.0 Flash — separate quota" },
+  { id: "gemini-2.5-pro", label: "2.5 Pro — best reasoning, lowest limits" },
 ];
+
+/**
+ * What this key can actually call, newest-looking first.
+ *
+ * Quotas are per-model, so when one is exhausted the fastest fix is switching
+ * to another the SAME key already has. Guessing at that list is what made the
+ * previous attempt worse instead of better.
+ */
+export async function availableModels(): Promise<string[]> {
+  const key = await getApiKey();
+  if (!key) return [];
+  const all = await listModels(key).catch(() => []);
+  return all
+    .filter((m) => m.startsWith("gemini-") && !/embedding|aqa|imagen|veo|tts/i.test(m))
+    .sort((a, b) => b.localeCompare(a));
+}
 
 /** Stops a tool loop from running away. Real answers need two or three. */
 const MAX_TURNS = 8;

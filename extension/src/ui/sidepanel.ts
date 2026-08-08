@@ -13,7 +13,14 @@
 
 import { AvenueError } from "../avenue/errors.js";
 import { INSTITUTIONS, type Institution, originPattern } from "../institutions.js";
-import { DEFAULT_MODEL, MODEL_CHOICES, ask, type CallTool, type ToolTrace } from "../llm/gemini.js";
+import {
+  DEFAULT_MODEL,
+  MODEL_CHOICES,
+  ask,
+  availableModels,
+  type CallTool,
+  type ToolTrace,
+} from "../llm/gemini.js";
 import {
   clearApiKey,
   getApiKey,
@@ -352,11 +359,31 @@ school.addEventListener("change", async () => {
 // A free-text field with suggestions, not a fixed list: Google adds and
 // retires model names faster than this extension ships, and being stuck on a
 // rate-limited one with no way out is exactly the problem this solves.
-for (const m of MODEL_CHOICES) {
-  const opt = document.createElement("option");
-  opt.value = m.id;
-  opt.label = m.label;
-  modelOptions.append(opt);
+function setSuggestions(ids: Array<{ value: string; label?: string }>): void {
+  modelOptions.replaceChildren();
+  for (const m of ids) {
+    const opt = document.createElement("option");
+    opt.value = m.value;
+    if (m.label) opt.label = m.label;
+    modelOptions.append(opt);
+  }
+}
+
+setSuggestions(MODEL_CHOICES.map((m) => ({ value: m.id, label: m.label })));
+
+/**
+ * Replace the guesses with what the key can actually call.
+ *
+ * Suggesting a model the account does not have turns "I am rate-limited" into
+ * "I am rate-limited AND the suggested fix errors", which is what happened.
+ */
+async function refreshModelSuggestions(): Promise<void> {
+  const models = await availableModels();
+  if (!models.length) return;
+  setSuggestions(models.map((value) => ({ value })));
+  modelHint.textContent =
+    `${models.length} models available to this key. Free limits are per-model, ` +
+    `so switching is the fastest fix when one is exhausted.`;
 }
 
 async function applyModel(): Promise<void> {
@@ -375,6 +402,7 @@ modelHint.textContent =
   "Type any Gemini model id, or pick a suggestion. Free-tier limits are " +
   "per-model, so switching is the fastest fix when one is rate-limited.";
 saveModelBtn.addEventListener("click", () => void applyModel());
+modelInput.addEventListener("focus", () => void refreshModelSuggestions(), { once: true });
 modelInput.addEventListener("change", () => void applyModel());
 modelInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
@@ -388,4 +416,5 @@ syncToolUi();
 await refreshGrantState();
 await refreshKeyState();
 void refreshIndexState();
+void refreshModelSuggestions();
 question.focus();
