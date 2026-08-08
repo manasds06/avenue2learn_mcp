@@ -68,17 +68,23 @@ export async function getCourseContent(args: { org_unit_id: number; max_depth?: 
         if (modId === null || seenModules.has(modId)) continue;
         seenModules.add(modId);
 
-        let structure = pick(node, "Structure", "Modules", "Topics");
-        if (!Array.isArray(structure)) {
-          try {
-            structure = await avenue.get("le", `${org_unit_id}/content/modules/${modId}/structure/`);
-          } catch (err) {
-            // Recorded, not silently swallowed. Dropping a subtree while still
-            // reporting a confident topic_count made the tool claim a course
-            // has 12 files when it has 40, with nothing to signal the gap.
-            unreadable.push({ module_id: modId, title, reason: String(err).slice(0, 160) });
-            structure = [];
-          }
+        // ALWAYS fetch the structure endpoint, even though `content/root/`
+        // embeds a `Structure` array. The embedded one is a STUB: its topic
+        // nodes carry only Id/Title/Type and NO Url, so file names — and with
+        // them the extension that decides how to parse a file — are missing.
+        // The endpoint returns full objects. Measured on 759806: embedded
+        // children have 5 keys, fetched children have 22 including Url.
+        let structure: unknown;
+        try {
+          structure = await avenue.get("le", `${org_unit_id}/content/modules/${modId}/structure/`);
+        } catch (err) {
+          // Fall back to the stub rather than losing the subtree entirely, and
+          // record it. Dropping a subtree while still reporting a confident
+          // topic_count made the tool claim a course has 12 files when it has
+          // 40, with nothing to signal the gap.
+          const embedded = pick(node, "Structure", "Modules", "Topics");
+          structure = Array.isArray(embedded) ? embedded : [];
+          unreadable.push({ module_id: modId, title, reason: String(err).slice(0, 160) });
         }
 
         const child = await walk(structure, depth + 1);
@@ -131,10 +137,19 @@ function topicTypeName(node: Record<string, unknown>): string {
   return "Topic";
 }
 
+/** 1 = File, 3 = Link in stock D2L. */
+const FILE_TOPIC_TYPES = new Set([1]);
+
 function isFileTopic(node: Record<string, unknown>, url: string): boolean {
   if (String(pick(node, "TypeIdentifier") ?? "") === "Link") return false;
+
+  // Type FIRST. Requiring a Url meant every topic from the stub structure —
+  // which has no Url — was reported as not downloadable, and the sync found
+  // zero files in a course with 26.
+  const type = asInt(pick(node, "TopicType", "Type"));
+  if (type !== null) return FILE_TOPIC_TYPES.has(type);
+
   if (!url) return false;
-  // An external link topic points off-instance; there is nothing to fetch from
-  // the content API for it.
+  // An external link points off-instance; nothing to fetch from the content API.
   return !/^https?:\/\//i.test(url);
 }

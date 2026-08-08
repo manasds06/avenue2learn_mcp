@@ -77,8 +77,8 @@ async function discover(orgUnitId: number): Promise<{ topics: Topic[]; complete:
       for (const t of mod.topics as unknown as Array<Record<string, unknown>>) {
         if (!t["is_downloadable"]) continue;
         const id = asInt(t["id"]);
+        if (id === null) continue;
         const fileName = String(t["file_name"] ?? "");
-        if (id === null || !fileName) continue;
         topics.push({
           topicId: id,
           title: String(t["title"] ?? fileName),
@@ -97,7 +97,7 @@ async function discover(orgUnitId: number): Promise<{ topics: Topic[]; complete:
     if (!t["is_downloadable"]) continue;
     const id = asInt(t["id"]);
     const fileName = String(t["file_name"] ?? "");
-    if (id !== null && fileName) {
+    if (id !== null) {
       topics.push({
         topicId: id,
         title: String(t["title"] ?? fileName),
@@ -105,6 +105,22 @@ async function discover(orgUnitId: number): Promise<{ topics: Topic[]; complete:
         modulePath: "",
         lastModified: (t["last_modified"] as { utc?: string } | null)?.utc ?? null,
       });
+    }
+  }
+
+  // A file name without an extension cannot be parsed — extract() dispatches
+  // on it — and would be silently counted as "unsupported". That is exactly
+  // how a whole course reported zero files. Resolve the real Url from the
+  // topic's own metadata instead of guessing.
+  for (const topic of topics) {
+    if (topic.fileName.includes(".")) continue;
+    try {
+      const meta = await avenue.get("le", `${orgUnitId}/content/topics/${topic.topicId}`);
+      const url = String(pick(meta, "Url", "Location") ?? "");
+      const tail = url.split("?")[0]?.split("/").pop() ?? "";
+      if (tail.includes(".")) topic.fileName = decodeURIComponent(tail);
+    } catch {
+      // Leave it; it will be reported as unsupported rather than crashing.
     }
   }
 
