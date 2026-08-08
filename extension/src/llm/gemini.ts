@@ -14,7 +14,7 @@
  */
 
 import { TOOLS } from "../tools/registry.js";
-import { getApiKey, getCurrentInstitution } from "../settings.js";
+import { getApiKey, getCurrentInstitution, getModel } from "../settings.js";
 import { toFunctionDeclarations } from "./schema.js";
 
 /**
@@ -46,6 +46,14 @@ const API_ROOT = "https://generativelanguage.googleapis.com/v1beta";
  */
 export const DEFAULT_MODEL = "gemini-2.5-flash";
 
+/** Offered in the panel. Free-tier limits vary a lot between these. */
+export const MODEL_CHOICES = [
+  { id: "gemini-2.5-flash-lite", label: "2.5 Flash Lite — cheapest, highest free limits" },
+  { id: "gemini-2.5-flash", label: "2.5 Flash — balanced (default)" },
+  { id: "gemini-2.0-flash", label: "2.0 Flash — older, separate quota" },
+  { id: "gemini-2.5-pro", label: "2.5 Pro — best reasoning, lowest free limits" },
+];
+
 /** Stops a tool loop from running away. Real answers need two or three. */
 const MAX_TURNS = 8;
 
@@ -53,6 +61,28 @@ interface Part {
   text?: string;
   functionCall?: { name: string; args?: Record<string, unknown> };
   functionResponse?: { name: string; response: Record<string, unknown> };
+  inlineData?: { mimeType: string; data: string };
+}
+
+/**
+ * Images cost roughly 350k tokens per megabyte of base64 and, because the
+ * whole conversation is resent each turn, an image sticks around for the rest
+ * of the exchange. Keeping only the most recent one bounds that: a follow-up
+ * question about a different page should not still be paying for the first.
+ */
+function dropStaleImages(contents: Content[]): void {
+  let seen = false;
+  for (let i = contents.length - 1; i >= 0; i--) {
+    const parts = contents[i]!.parts;
+    for (let j = parts.length - 1; j >= 0; j--) {
+      if (!parts[j]!.inlineData) continue;
+      if (seen) {
+        parts[j] = { text: "[earlier page image omitted to save quota]" };
+      } else {
+        seen = true;
+      }
+    }
+  }
 }
 interface Content {
   role: "user" | "model";
@@ -139,7 +169,11 @@ async function callGemini(
       throw new Error(`The model "${model}" is not available.${hint}`);
     }
     if (resp.status === 429) {
-      throw new Error("Gemini rate-limited this key. Wait a moment and try again.");
+      throw new Error(
+        `${model} has hit its quota on this key. Free tiers are per-model, so ` +
+          `switching model in Setup usually works immediately — 2.5 Flash Lite has ` +
+          `the highest free limits. Otherwise the quota resets daily.`,
+      );
     }
     throw new Error(`Gemini error: ${detail}`);
   }
@@ -179,7 +213,7 @@ export async function ask(
     throw new Error("No Gemini API key set. Add one under Setup, then ask again.");
   }
 
-  const model = opts.model ?? DEFAULT_MODEL;
+  const model = opts.model ?? (await getModel(DEFAULT_MODEL));
   const inst = await getCurrentInstitution();
   const declarations = toFunctionDeclarations(TOOLS);
 
@@ -228,7 +262,7 @@ export async function ask(
     contents.push({ role: "model", parts });
 
     // Gemini can request several tools at once; run them together.
-    const responses: Part[] = await Promise.all(
+    const nested: Part[][] = await Promise.all(
       calls.map(async (call) => {
         const args = call.args ?? {};
         const outcome = await callTool(call.name, args);
@@ -239,25 +273,44 @@ export async function ask(
           summary: outcome.ok ? summarize(outcome.result) : outcome.message,
         });
 
-        // A failed tool is DATA, not an exception. The typed error carries the
-        // next step, and the model needs to relay it — throwing here would
-        // replace an actionable answer with a dead end.
-        return {
-          functionResponse: {
-            name: call.name,
-            response: outcome.ok
-              ? ({ result: outcome.result } as Record<string, unknown>)
-              : ({
+        if (!outcome.ok) {
+          // A failed tool is DATA, not an exception. The typed error carries a
+          // next step and the model needs to relay it — throwing here would
+          // replace an actionable answer with a dead end.
+          return [
+            {
+              functionResponse: {
+                name: call.name,
+                response: {
                   error: outcome.error,
                   message: outcome.message,
                   next_step: outcome.next_step ?? null,
-                } as Record<string, unknown>),
-          },
-        } satisfies Part;
+                },
+              },
+            },
+          ];
+        }
+
+        // An image must travel as inlineData, NOT inside the response JSON.
+        // Base64 in a functionResponse is charged as text — 100k+ tokens for
+        // one page — and gets resent on every later turn.
+        const result = outcome.result as Record<string, unknown> | null;
+        const image = result?.["_inlineImage"] as
+          | { mimeType: string; data: string }
+          | undefined;
+        const payload = image ? { ...result } : result;
+        if (image) delete (payload as Record<string, unknown>)["_inlineImage"];
+
+        const parts: Part[] = [
+          { functionResponse: { name: call.name, response: { result: payload } } },
+        ];
+        if (image) parts.push({ inlineData: image });
+        return parts;
       }),
     );
 
-    contents.push({ role: "user", parts: responses });
+    contents.push({ role: "user", parts: nested.flat() });
+    dropStaleImages(contents);
   }
 
   throw new Error(

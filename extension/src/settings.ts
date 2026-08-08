@@ -21,6 +21,7 @@ import {
 
 const KEY_INSTITUTION = "institution_id";
 const KEY_API_KEY = "gemini_api_key";
+const KEY_MODEL = "gemini_model";
 
 export async function getInstitutionId(): Promise<string> {
   const stored = await chrome.storage.local.get(KEY_INSTITUTION);
@@ -78,4 +79,21 @@ export async function setApiKey(key: string): Promise<void> {
 
 export async function clearApiKey(): Promise<void> {
   await chrome.storage.local.remove(KEY_API_KEY);
+}
+
+// --- model ------------------------------------------------------------------
+
+/**
+ * Free-tier quotas differ sharply between models, and a student on a free key
+ * will hit whichever is stingiest. Making this a setting means running out is
+ * a dropdown away from being fixed rather than a rebuild.
+ */
+export async function getModel(fallback: string): Promise<string> {
+  const stored = await chrome.storage.local.get(KEY_MODEL);
+  const model = stored[KEY_MODEL];
+  return typeof model === "string" && model ? model : fallback;
+}
+
+export async function setModel(model: string): Promise<void> {
+  await chrome.storage.local.set({ [KEY_MODEL]: model.trim() });
 }

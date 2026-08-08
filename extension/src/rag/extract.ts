@@ -120,12 +120,27 @@ async function extractPdf(bytes: ArrayBuffer): Promise<Extraction> {
   return { segments, pageCount: doc.numPages, quality: "ok" };
 }
 
-/** Render one page to a PNG data URL, so a diagram can actually be looked at. */
+/**
+ * Render one page so a diagram can actually be looked at.
+ *
+ * Returns raw base64 rather than a data URL, because the caller sends it to
+ * the model as an inlineData part. Dimensions are capped: an uncapped A4 page
+ * at scale 3 is a multi-megabyte PNG, and every megabyte is roughly 350k
+ * tokens of quota.
+ */
+const MAX_RENDER_PX = 1400;
+
 export async function renderPdfPage(
   bytes: ArrayBuffer,
   pageNumber: number,
-  scale = 2,
-): Promise<{ dataUrl: string; width: number; height: number; pageCount: number }> {
+  scale = 1.5,
+): Promise<{
+  base64: string;
+  mimeType: string;
+  width: number;
+  height: number;
+  pageCount: number;
+}> {
   const pdfjs = await getPdfjs();
   const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)) }).promise;
 
@@ -136,28 +151,50 @@ export async function renderPdfPage(
       );
     }
     const page = await doc.getPage(pageNumber);
-    const viewport = page.getViewport({ scale });
+
+    // Cap the long edge before rendering rather than downscaling after: a
+    // 3000px canvas costs the memory whether or not we keep the pixels.
+    const base = page.getViewport({ scale: 1 });
+    const longEdge = Math.max(base.width, base.height);
+    const capped = Math.min(scale, MAX_RENDER_PX / longEdge);
+    const viewport = page.getViewport({ scale: Math.max(0.5, capped) });
+
     const canvas = new OffscreenCanvas(viewport.width, viewport.height);
     const context = canvas.getContext("2d") as unknown as CanvasRenderingContext2D;
+
+    // White background: PDF pages are transparent, and JPEG has no alpha, so
+    // without this the text renders on black.
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, viewport.width, viewport.height);
 
     await page.render({
       canvas: canvas as unknown as HTMLCanvasElement,
       canvasContext: context,
       viewport,
     }).promise;
-    const blob = await canvas.convertToBlob({ type: "image/png" });
-    const dataUrl = await blobToDataUrl(blob);
 
-    return { dataUrl, width: viewport.width, height: viewport.height, pageCount: doc.numPages };
+    // JPEG, not PNG. A text-heavy page is 4-8x smaller as JPEG, and the model
+    // is reading a diagram, not inspecting pixels.
+    const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.82 });
+    return {
+      base64: await blobToBase64(blob),
+      mimeType: "image/jpeg",
+      width: viewport.width,
+      height: viewport.height,
+      pageCount: doc.numPages,
+    };
   } finally {
     await (doc as unknown as { destroy(): Promise<void> }).destroy();
   }
 }
 
-function blobToDataUrl(blob: Blob): Promise<string> {
+function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
+    reader.onload = () => {
+      const result = String(reader.result);
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(blob);
   });

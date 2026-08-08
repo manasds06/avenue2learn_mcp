@@ -13,15 +13,17 @@
 
 import { AvenueError } from "../avenue/errors.js";
 import { INSTITUTIONS, type Institution, originPattern } from "../institutions.js";
-import { ask, type CallTool, type ToolTrace } from "../llm/gemini.js";
+import { DEFAULT_MODEL, MODEL_CHOICES, ask, type CallTool, type ToolTrace } from "../llm/gemini.js";
 import {
   clearApiKey,
   getApiKey,
   getCurrentInstitution,
   hasHostPermission,
   requestHostPermission,
+  getModel,
   setApiKey,
   setInstitutionId,
+  setModel,
 } from "../settings.js";
 import { hasModelPermission, requestModelPermission } from "../rag/embed.js";
 import { setSyncProgressSink } from "../tools/materials.js";
@@ -35,6 +37,8 @@ const school = $<HTMLSelectElement>("school");
 const grantRow = $<HTMLDivElement>("grant-row");
 const grantHint = $<HTMLParagraphElement>("grant-hint");
 const grantBtn = $<HTMLButtonElement>("grant");
+const modelSelect = $<HTMLSelectElement>("model");
+const indexHint = $<HTMLParagraphElement>("index-hint");
 const apiKeyInput = $<HTMLInputElement>("apikey");
 const saveKeyBtn = $<HTMLButtonElement>("save-key");
 const keyHint = $<HTMLParagraphElement>("key-hint");
@@ -160,6 +164,7 @@ async function submitQuestion(text: string): Promise<void> {
   } finally {
     progressBubble?.remove();
     progressBubble = null;
+    void refreshIndexState();
     busy = false;
     sendBtn.disabled = false;
     question.focus();
@@ -246,6 +251,21 @@ grantBtn.addEventListener("click", async () => {
   }
   await refreshGrantState();
 });
+
+/**
+ * Show what is already indexed.
+ *
+ * The index PERSISTS in IndexedDB across restarts, and sync is incremental —
+ * but nothing said so, which makes re-syncing look mandatory.
+ */
+async function refreshIndexState(): Promise<void> {
+  const resp = await callTool("get_status", {});
+  if (!resp.ok) return;
+  const index = (resp.result as { index?: { documents: number; chunks: number } }).index;
+  indexHint.textContent = index?.documents
+    ? `${index.documents} file(s) indexed, ${index.chunks} passages. Kept between sessions — re-sync only when new material is posted.`
+    : "No course files indexed yet. Ask to sync a course to enable file search.";
+}
 
 async function refreshModelState(): Promise<void> {
   const granted = await hasModelPermission();
@@ -351,9 +371,22 @@ school.addEventListener("change", async () => {
   await refreshGrantState();
 });
 
+for (const m of MODEL_CHOICES) {
+  const opt = document.createElement("option");
+  opt.value = m.id;
+  opt.textContent = m.label;
+  modelSelect.append(opt);
+}
+modelSelect.value = await getModel(DEFAULT_MODEL);
+modelSelect.addEventListener("change", async () => {
+  await setModel(modelSelect.value);
+  bubble("info").textContent = `Now using ${modelSelect.value}.`;
+});
+
 toolSelect.value = "list_courses";
 syncToolUi();
 await refreshGrantState();
 await refreshKeyState();
 await refreshModelState();
+void refreshIndexState();
 question.focus();

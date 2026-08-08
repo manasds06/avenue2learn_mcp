@@ -143,3 +143,40 @@ describe("RAG tools declare where they can run", () => {
     expect(src).toContain('await import("../tools/registry.js")');
   });
 });
+
+describe("images never travel as text", () => {
+  it("get_page_image keeps the payload out of the model-visible JSON", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+
+    const materials = readFileSync(join(root, "src/tools/materials.ts"), "utf8");
+    // A base64 PNG inside a functionResponse is charged as text: 100k-500k
+    // tokens for ONE page, resent on every later turn. It exhausted a free
+    // key in a single question during testing.
+    expect(materials).not.toMatch(/image_data_url/);
+    expect(materials).toContain("_inlineImage");
+  });
+
+  it("the loop strips it out and sends inlineData instead", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+
+    const loop = readFileSync(join(root, "src/llm/gemini.ts"), "utf8");
+    expect(loop).toContain('delete (payload as Record<string, unknown>)["_inlineImage"]');
+    expect(loop).toContain("inlineData: image");
+    // And only the newest image survives in history.
+    expect(loop).toContain("dropStaleImages");
+  });
+
+  it("renders bounded JPEG rather than an unbounded PNG", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
+
+    const extract = readFileSync(join(root, "src/rag/extract.ts"), "utf8");
+    expect(extract).toContain("MAX_RENDER_PX");
+    expect(extract).toContain("image/jpeg");
+  });
+});

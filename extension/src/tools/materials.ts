@@ -158,8 +158,12 @@ export async function getPageImage(args: {
   }
 
   const bytes = await downloadTopic(args.org_unit_id, args.topic_id);
-  const scale = Math.min(4, Math.max(1, (args.dpi ?? 150) / 72));
-  const { dataUrl, width, height, pageCount } = await renderPdfPage(bytes, args.page, scale);
+  const scale = Math.min(3, Math.max(1, (args.dpi ?? 110) / 72));
+  const { base64, mimeType, width, height, pageCount } = await renderPdfPage(
+    bytes,
+    args.page,
+    scale,
+  );
 
   return {
     org_unit_id: args.org_unit_id,
@@ -169,8 +173,14 @@ export async function getPageImage(args: {
     page_count: pageCount,
     width,
     height,
-    image_data_url: dataUrl,
-    note: "Rendered page image. Requires a vision-capable model to interpret.",
+    note: "Rendered page image, attached separately. Requires a vision-capable model.",
+    // NOT part of the JSON the model reads. The loop lifts this out and sends
+    // it as an inlineData part.
+    //
+    // Putting a base64 PNG in the tool RESULT costs 100k-500k tokens for one
+    // page, and the conversation resends it on every later turn — enough to
+    // exhaust a free API key in a single question. It cost one, in testing.
+    _inlineImage: { mimeType, data: base64 },
   };
 }
 
