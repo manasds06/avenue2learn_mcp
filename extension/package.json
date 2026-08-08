@@ -5,11 +5,12 @@
   "description": "Chrome extension client for Avenue to Learn, with LLM tool calling",
   "type": "module",
   "scripts": {
-    "build": "node build.mjs",
+    "build": "node scripts/fetch-model.mjs && node build.mjs",
     "watch": "node build.mjs --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "fetch-model": "node scripts/fetch-model.mjs"
   },
   "devDependencies": {
     "@huggingface/transformers": "^4.2.0",

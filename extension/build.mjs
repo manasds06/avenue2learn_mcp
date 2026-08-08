@@ -21,6 +21,8 @@ import { cp, mkdir, readdir, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 
 const watch = process.argv.includes("--watch");
+/** Must match MODEL_ID in src/rag/embed.ts — transformers.js resolves by path. */
+const MODEL_DIR = "bge-small-en-v1.5";
 const outdir = "dist";
 
 await rm(outdir, { recursive: true, force: true });
@@ -52,7 +54,19 @@ async function copyStatic() {
 
   // pdf.js worker
   await mkdir(`${outdir}/vendor`, { recursive: true });
-  await cp("node_modules/pdfjs-dist/build/pdf.worker.min.mjs", `${outdir}/vendor/pdf.worker.mjs`);
+  // Copied as .js, NOT .mjs: Chrome serves extension files by extension, and a
+  // module worker fetched from a .mjs URL is rejected on MIME grounds.
+  await cp(
+    "node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs",
+    `${outdir}/vendor/pdf.worker.js`,
+  );
+
+  // The embedding model itself (~33MB). Bundled rather than fetched: a remote
+  // fetch needed a third host permission whose prompt is unreliable from a
+  // side panel, and it made the first sync depend on a CDN.
+  if (existsSync("vendor-model")) {
+    await cp("vendor-model", `${outdir}/vendor/model/${MODEL_DIR}`, { recursive: true });
+  }
 
   // onnxruntime WASM, kept local so nothing executable is fetched at runtime.
   //

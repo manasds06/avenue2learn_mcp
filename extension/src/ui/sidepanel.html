@@ -21,7 +21,13 @@
       </div>
 
       <label for="model">Model</label>
-      <select id="model"></select>
+      <div class="key-row">
+        <input id="model" list="model-options" autocomplete="off" spellcheck="false"
+               placeholder="gemini-2.5-flash" />
+        <button id="save-model" type="button" class="secondary">Use</button>
+      </div>
+      <datalist id="model-options"></datalist>
+      <p class="hint" id="model-hint"></p>
       <p class="hint" id="index-hint"></p>
 
       <label for="apikey">Gemini API key</label>
@@ -32,10 +38,6 @@
       </div>
       <p class="hint" id="key-hint"></p>
 
-      <div id="model-row" hidden>
-        <p class="hint" id="model-hint"></p>
-        <button id="allow-model" type="button" class="secondary">Allow model download</button>
-      </div>
 
       <details id="devtools">
         <summary>Run a tool directly</summary>

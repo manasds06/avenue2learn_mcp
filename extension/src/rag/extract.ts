@@ -71,21 +71,56 @@ let pdfjsPromise: Promise<typeof import("pdfjs-dist")> | null = null;
 
 async function getPdfjs() {
   if (!pdfjsPromise) {
-    pdfjsPromise = import("pdfjs-dist").then((lib) => {
-      // The worker is bundled into the package: MV3 will not load one from a
-      // CDN, and pdf.js parses off the main thread by default.
-      lib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("vendor/pdf.worker.mjs");
-      return lib;
+    // The LEGACY build: it avoids the newest syntax and is the one that
+    // survives an extension's CSP without eval.
+    pdfjsPromise = import("pdfjs-dist/legacy/build/pdf.mjs").then((lib) => {
+      // Bundled, not fetched — MV3 will not load a worker from a CDN. The file
+      // is deliberately named .js: Chrome serves extension files by extension
+      // and rejects a module worker fetched from a .mjs URL on MIME grounds,
+      // which silently broke EVERY PDF while DOCX kept working.
+      lib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL("vendor/pdf.worker.js");
+      return lib as unknown as typeof import("pdfjs-dist");
     });
   }
   return pdfjsPromise;
 }
 
-async function extractPdf(bytes: ArrayBuffer): Promise<Extraction> {
+/**
+ * Open a document, falling back to main-thread parsing if the worker will not
+ * start.
+ *
+ * Slower, but a whole course of PDFs failing is a much worse outcome than a
+ * sync that takes longer. `isEvalSupported: false` is required either way:
+ * an extension's CSP forbids eval, and pdf.js otherwise reaches for it.
+ */
+async function openPdf(bytes: ArrayBuffer) {
   const pdfjs = await getPdfjs();
-  // pdf.js takes ownership of the buffer, so hand it a copy — the caller still
+  const common = { isEvalSupported: false, useWorkerFetch: false, useSystemFonts: false };
+
+  // The LOADING TASK owns destroy(), not the document proxy. Calling
+  // doc.destroy() throws "t.destroy is not a function" after minification —
+  // which failed every single PDF in a course while DOCX kept working.
+  // TypeScript flagged exactly this and an earlier version cast the error
+  // away; the cast was the bug.
+  let task = pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)), ...common });
+  try {
+    return { doc: await task.promise, task };
+  } catch (err) {
+    console.warn("pdf.js worker unavailable, retrying on the main thread", err);
+    await task.destroy().catch(() => {});
+    task = pdfjs.getDocument({
+      data: new Uint8Array(bytes.slice(0)),
+      ...common,
+      disableWorker: true,
+    } as Parameters<typeof pdfjs.getDocument>[0]);
+    return { doc: await task.promise, task };
+  }
+}
+
+async function extractPdf(bytes: ArrayBuffer): Promise<Extraction> {
+  // pdf.js takes ownership of the buffer, so it gets a copy — the caller still
   // needs the original to hash.
-  const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)) }).promise;
+  const { doc, task } = await openPdf(bytes);
 
   const segments: Segment[] = [];
   try {
@@ -101,7 +136,7 @@ async function extractPdf(bytes: ArrayBuffer): Promise<Extraction> {
       p.cleanup();
     }
   } finally {
-    await (doc as unknown as { destroy(): Promise<void> }).destroy();
+    await task.destroy().catch(() => {});
   }
 
   const total = segments.reduce((n, s) => n + s.text.length, 0);
@@ -141,8 +176,8 @@ export async function renderPdfPage(
   height: number;
   pageCount: number;
 }> {
-  const pdfjs = await getPdfjs();
-  const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes.slice(0)) }).promise;
+
+  const { doc, task } = await openPdf(bytes);
 
   try {
     if (pageNumber < 1 || pageNumber > doc.numPages) {
@@ -184,7 +219,7 @@ export async function renderPdfPage(
       pageCount: doc.numPages,
     };
   } finally {
-    await (doc as unknown as { destroy(): Promise<void> }).destroy();
+    await task.destroy().catch(() => {});
   }
 }
 

@@ -205,3 +205,35 @@ describe("the package stays a reasonable download", () => {
     expect(build).not.toContain("jsep.wasm");
   });
 });
+
+describe("the search model ships with the extension", () => {
+  const manifest = JSON.parse(readFileSync(join(ROOT, "manifest.json"), "utf8"));
+
+  it("needs no third-party host to index files", () => {
+    const hosts: string[] = [
+      ...(manifest.host_permissions ?? []),
+      ...(manifest.optional_host_permissions ?? []),
+    ];
+    // Fetching weights needed a permission prompt that is unreliable from a
+    // side panel — the button silently did nothing — and made a first sync
+    // depend on a CDN. Bundling costs package size and buys back the
+    // two-host guarantee plus offline indexing.
+    expect(hosts.some((h) => h.includes("huggingface"))).toBe(false);
+  });
+
+  it("loads the model from the package, never the network", () => {
+    const embed = code(join(ROOT, "src/rag/embed.ts"));
+    expect(embed).toContain("env.allowRemoteModels = false");
+    expect(embed).toContain("localModelPath");
+  });
+
+  it("build copies the model under the id the loader resolves", () => {
+    const build = readFileSync(join(ROOT, "build.mjs"), "utf8");
+    const embed = readFileSync(join(ROOT, "src/rag/embed.ts"), "utf8");
+    const dir = build.match(/const MODEL_DIR = "([^"]+)"/)?.[1];
+    const id = embed.match(/MODEL_ID = "([^"]+)"/)?.[1];
+    // transformers.js resolves by path, so a mismatch is a silent 404 at
+    // load time rather than a build error.
+    expect(dir, "MODEL_DIR must equal MODEL_ID").toBe(id);
+  });
+});

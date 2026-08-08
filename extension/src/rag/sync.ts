@@ -300,7 +300,32 @@ export async function syncCourse(
       "Part of the content tree could not be read, so some files were never seen.",
     );
   }
-  if (errors.length) notes.push(`${errors.length} file(s) could not be indexed; see errors.`);
+
+  // Group by cause. Twenty-five files failing for ONE reason is a single
+  // environmental problem; listing it twenty-five times buries that. The first
+  // real sync failed exactly this way and the shape of it was invisible.
+  const byReason = new Map<string, string[]>();
+  for (const e of errors) {
+    const key = e.reason.slice(0, 120);
+    byReason.set(key, [...(byReason.get(key) ?? []), e.file_name]);
+  }
+  const grouped = [...byReason.entries()]
+    .sort((a, b) => b[1].length - a[1].length)
+    .map(([reason, files]) => ({
+      reason,
+      count: files.length,
+      examples: files.slice(0, 3),
+    }));
+
+  if (errors.length) {
+    const top = grouped[0]!;
+    notes.push(
+      errors.length === top.count && errors.length > 2
+        ? `All ${errors.length} failures share one cause: ${top.reason} — that is an ` +
+          `environment problem, not a problem with the files.`
+        : `${errors.length} file(s) could not be indexed; see failure_summary.`,
+    );
+  }
 
   return {
     org_unit_id: orgUnitId,

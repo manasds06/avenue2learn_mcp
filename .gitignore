@@ -39,3 +39,9 @@ Thumbs.db
 # --- Extension build artifacts -----------------------------------------
 extension/node_modules/
 extension/dist/
+
+# --- Embedding model weights ------------------------------------------
+# ~33MB, fetched with `npm run fetch-model` in extension/. A binary this
+# size in git history is paid for by every clone, forever, and it changes
+# only when the model does.
+extension/vendor-model/

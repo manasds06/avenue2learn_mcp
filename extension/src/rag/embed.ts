@@ -6,14 +6,15 @@
  * embedding API — which is the whole reason a local model was chosen over a
  * hosted one.
  *
- * TWO THINGS ARE FETCHED, AND THEY ARE DIFFERENT:
+ * NOTHING IS FETCHED AT RUNTIME. Both the WASM runtime and the model weights
+ * (~33MB) ship inside the package.
  *
- *   - The WASM runtime is BUNDLED in this package. Executable code is not
- *     pulled from a CDN at runtime.
- *   - The model WEIGHTS (~30MB, once, then cached by the browser) come from
- *     HuggingFace. Bundling them would add 30MB to every extension update, so
- *     that host is an OPTIONAL permission requested at first sync — the user
- *     agrees to it as part of an action they started.
+ * An earlier version pulled the weights from HuggingFace behind an optional
+ * permission. That was worse on every axis: chrome.permissions.request() is
+ * unreliable from a side panel and the button silently did nothing, it added a
+ * third host to a manifest whose whole selling point is two, and it made the
+ * first sync depend on a CDN being reachable. Bundling costs package size and
+ * buys back the two-host guarantee, offline indexing, and one fewer prompt.
  *
  * MODEL IDENTITY IS RECORDED WITH THE INDEX. Vectors from different models are
  * not comparable, and silently mixing them produces garbage rankings that look
@@ -24,17 +25,18 @@ import { env, pipeline, type FeatureExtractionPipeline } from "@huggingface/tran
 
 import { getMeta, setMeta } from "./store.js";
 
-export const MODEL_ID = "Xenova/bge-small-en-v1.5";
+/** Directory name under vendor/model/, not a HuggingFace repo id. */
+export const MODEL_ID = "bge-small-en-v1.5";
 export const EMBED_DIM = 384;
 
 const MODEL_META_KEY = "embed_model";
 
-/** Host permissions needed before weights can be fetched. */
-export const MODEL_ORIGINS = [
-  "https://huggingface.co/*",
-  "https://cdn-lfs.huggingface.co/*",
-  "https://cdn-lfs-us-1.huggingface.co/*",
-];
+/**
+ * Kept as an empty list so the guarantee tests stay meaningful: if anyone
+ * reintroduces a remote model source, they have to add the host here AND to
+ * the manifest, and the tests will notice.
+ */
+export const MODEL_ORIGINS: string[] = [];
 
 let extractor: Promise<FeatureExtractionPipeline> | null = null;
 
@@ -54,17 +56,16 @@ function configure(): void {
   wasm["proxy"] = false;
   (env.backends.onnx as { wasm?: unknown }).wasm = wasm;
 
-  env.allowLocalModels = false;
-  env.useBrowserCache = true;
+  // Load from the package, never the network.
+  env.allowLocalModels = true;
+  env.allowRemoteModels = false;
+  env.localModelPath = chrome.runtime.getURL("vendor/model/");
+  env.useBrowserCache = false;
 }
 
+/** The model ships with the extension, so there is nothing to grant. */
 export async function hasModelPermission(): Promise<boolean> {
-  return chrome.permissions.contains({ origins: MODEL_ORIGINS });
-}
-
-/** Must be called from a user gesture — see settings.ts. */
-export async function requestModelPermission(): Promise<boolean> {
-  return chrome.permissions.request({ origins: MODEL_ORIGINS });
+  return true;
 }
 
 export class EmbedError extends Error {}
@@ -73,20 +74,15 @@ async function getExtractor(
   onProgress?: (msg: string) => void,
 ): Promise<FeatureExtractionPipeline> {
   if (!extractor) {
-    if (!(await hasModelPermission())) {
-      throw new EmbedError(
-        "Downloading the search model needs one-time access to huggingface.co. " +
-          "Open Setup and allow it, then sync again.",
-      );
-    }
     configure();
-    onProgress?.("Downloading the search model (~30 MB, once)…");
+    onProgress?.("Loading the search model…");
 
     extractor = pipeline("feature-extraction", MODEL_ID, {
       dtype: "q8",
+      local_files_only: true,
       progress_callback: (p: { status?: string; progress?: number }) => {
         if (p.status === "progress" && typeof p.progress === "number") {
-          onProgress?.(`Downloading the search model… ${Math.round(p.progress)}%`);
+          onProgress?.(`Loading the search model… ${Math.round(p.progress)}%`);
         }
       },
     }).catch((err) => {

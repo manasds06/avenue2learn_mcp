@@ -25,7 +25,6 @@ import {
   setInstitutionId,
   setModel,
 } from "../settings.js";
-import { hasModelPermission, requestModelPermission } from "../rag/embed.js";
 import { setSyncProgressSink } from "../tools/materials.js";
 import { PANEL_TOOLS, TOOLS, TOOLS_BY_NAME } from "../tools/registry.js";
 
@@ -37,7 +36,10 @@ const school = $<HTMLSelectElement>("school");
 const grantRow = $<HTMLDivElement>("grant-row");
 const grantHint = $<HTMLParagraphElement>("grant-hint");
 const grantBtn = $<HTMLButtonElement>("grant");
-const modelSelect = $<HTMLSelectElement>("model");
+const modelInput = $<HTMLInputElement>("model");
+const modelOptions = $<HTMLDataListElement>("model-options");
+const saveModelBtn = $<HTMLButtonElement>("save-model");
+const modelHint = $<HTMLParagraphElement>("model-hint");
 const indexHint = $<HTMLParagraphElement>("index-hint");
 const apiKeyInput = $<HTMLInputElement>("apikey");
 const saveKeyBtn = $<HTMLButtonElement>("save-key");
@@ -46,9 +48,6 @@ const toolSelect = $<HTMLSelectElement>("tool");
 const toolDesc = $<HTMLParagraphElement>("tool-desc");
 const argsBox = $<HTMLTextAreaElement>("args");
 const runBtn = $<HTMLButtonElement>("run");
-const modelRow = $<HTMLDivElement>("model-row");
-const modelHint = $<HTMLParagraphElement>("model-hint");
-const allowModelBtn = $<HTMLButtonElement>("allow-model");
 const thread = $<HTMLDivElement>("thread");
 const composer = $<HTMLFormElement>("composer");
 const question = $<HTMLTextAreaElement>("question");
@@ -267,27 +266,6 @@ async function refreshIndexState(): Promise<void> {
     : "No course files indexed yet. Ask to sync a course to enable file search.";
 }
 
-async function refreshModelState(): Promise<void> {
-  const granted = await hasModelPermission();
-  modelRow.hidden = granted;
-  if (!granted) {
-    modelHint.textContent =
-      "Searching inside course files uses a small language model that runs in " +
-      "your browser. Downloading it (~30 MB, once) needs one-time access to " +
-      "huggingface.co. Your course files are never uploaded — the model comes " +
-      "to them.";
-  }
-}
-
-allowModelBtn.addEventListener("click", async () => {
-  if (!(await requestModelPermission())) {
-    bubble("err").textContent =
-      "Model download not allowed, so file search will fall back to keyword matching only.";
-    return;
-  }
-  await refreshModelState();
-});
-
 /**
  * A first sync takes minutes. Reporting progress in one reusable bubble beats
  * a silent panel that looks hung.
@@ -371,22 +349,43 @@ school.addEventListener("change", async () => {
   await refreshGrantState();
 });
 
+// A free-text field with suggestions, not a fixed list: Google adds and
+// retires model names faster than this extension ships, and being stuck on a
+// rate-limited one with no way out is exactly the problem this solves.
 for (const m of MODEL_CHOICES) {
   const opt = document.createElement("option");
   opt.value = m.id;
-  opt.textContent = m.label;
-  modelSelect.append(opt);
+  opt.label = m.label;
+  modelOptions.append(opt);
 }
-modelSelect.value = await getModel(DEFAULT_MODEL);
-modelSelect.addEventListener("change", async () => {
-  await setModel(modelSelect.value);
-  bubble("info").textContent = `Now using ${modelSelect.value}.`;
+
+async function applyModel(): Promise<void> {
+  const chosen = modelInput.value.trim();
+  if (!chosen) {
+    modelInput.value = await getModel(DEFAULT_MODEL);
+    return;
+  }
+  await setModel(chosen);
+  modelHint.textContent = `Using ${chosen}. Any Gemini model id works; an unknown one reports which are available for your key.`;
+  bubble("info").textContent = `Now using ${chosen}.`;
+}
+
+modelInput.value = await getModel(DEFAULT_MODEL);
+modelHint.textContent =
+  "Type any Gemini model id, or pick a suggestion. Free-tier limits are " +
+  "per-model, so switching is the fastest fix when one is rate-limited.";
+saveModelBtn.addEventListener("click", () => void applyModel());
+modelInput.addEventListener("change", () => void applyModel());
+modelInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    void applyModel();
+  }
 });
 
 toolSelect.value = "list_courses";
 syncToolUi();
 await refreshGrantState();
 await refreshKeyState();
-await refreshModelState();
 void refreshIndexState();
 question.focus();
