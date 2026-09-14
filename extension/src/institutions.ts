@@ -43,6 +43,22 @@ export const CAPABILITY_KEYS = [
 
 export type CapabilityKey = (typeof CAPABILITY_KEYS)[number];
 
+/**
+ * A school's colours.
+ *
+ * `accent` carries the chrome — title bar, active tab, links, primary buttons.
+ * `accentSoft` is the highlight, used sparingly for counts and status pills,
+ * and ONLY ever as a background for `accentInk` text. That pairing is the one
+ * rule worth stating: `accentSoft` is chosen to be legible under `accentInk`,
+ * not to be readable as a foreground colour itself.
+ */
+export interface Skin {
+  accent: string;
+  accentSoft: string;
+  /** Text drawn on `accentSoft`. Must clear contrast against it. */
+  accentInk: string;
+}
+
 export interface Institution {
   id: string;
   orgName: string;
@@ -53,6 +69,22 @@ export interface Institution {
   loginUrl: string;
   /** What the school calls its credentials, e.g. "MacID". */
   credentialBrand: string;
+  /**
+   * The school's skin. Three colours drive the entire panel.
+   *
+   * The panel used to hardcode McMaster maroon. Showing a Carleton student
+   * maroon chrome is the same category of error as calling their LMS
+   * "Avenue" — it belongs to a school that is not theirs.
+   *
+   * Everything else is DERIVED from these at runtime — borders, dividers,
+   * shadows and tints are all `color-mix` of `accent`, so a new school needs
+   * three hex values and nothing else. See ui/theme.css.
+   *
+   * COLOUR ONLY, never a logo or wordmark. A school's colours in a student's
+   * own tool is a different thing from reproducing its mark, and staying on
+   * the right side of that line is why there are no image assets here.
+   */
+  skin: Skin;
   timezone: string;
   capabilities: Partial<Record<CapabilityKey, Capability>>;
   probedAt: string | null;
@@ -70,6 +102,7 @@ export const MCMASTER: Institution = {
   baseUrl: "https://avenue.cllmcmaster.ca",
   loginUrl: "https://avenue.mcmaster.ca/login.php",
   credentialBrand: "MacID",
+  skin: { accent: "#7A003C", accentSoft: "#FDBF57", accentInk: "#5C2A00" },
   timezone: "America/Toronto",
   capabilities: {
     course_details: "denied",
@@ -101,6 +134,7 @@ export const CARLETON: Institution = {
   // D2L username/password box that MyCarletonOne credentials do not work in.
   loginUrl: "https://brightspace.carleton.ca/d2l/lp/auth/saml/login",
   credentialBrand: "MyCarletonOne",
+  skin: { accent: "#C8102E", accentSoft: "#F2A900", accentInk: "#5A3A00" },
   timezone: "America/Toronto",
   capabilities: {
     course_details: "denied",
@@ -122,9 +156,37 @@ export const CARLETON: Institution = {
   probeDoc: "docs/09-carleton-probe-results.md",
 };
 
+/**
+ * Western — added for the skin, NOT probed.
+ *
+ * Note what is and is not asserted here. The colours are right; the host and
+ * login URL are my best understanding of where OWL Brightspace lives and have
+ * NOT been confirmed against a live session, and `capabilities` is empty so
+ * every route reports "unverified" rather than borrowing McMaster's results.
+ *
+ * That is the honest state for a school nobody has tested, and it is exactly
+ * what `describeDenial` is built to phrase. If the host is wrong the symptom is
+ * a clean "could not reach" rather than silently wrong data — but it does need
+ * a probe before anyone relies on it.
+ */
+export const WESTERN: Institution = {
+  id: "western",
+  orgName: "Western University",
+  lmsName: "OWL Brightspace",
+  baseUrl: "https://westernu.brightspace.com",
+  loginUrl: "https://westernu.brightspace.com/d2l/login",
+  credentialBrand: "Western Identity",
+  skin: { accent: "#4F2683", accentSoft: "#C5B4E3", accentInk: "#2E1650" },
+  timezone: "America/Toronto",
+  capabilities: {},
+  probedAt: null,
+  probeDoc: null,
+};
+
 export const INSTITUTIONS: Record<string, Institution> = {
   [MCMASTER.id]: MCMASTER,
   [CARLETON.id]: CARLETON,
+  [WESTERN.id]: WESTERN,
 };
 
 export const DEFAULT_INSTITUTION_ID = MCMASTER.id;

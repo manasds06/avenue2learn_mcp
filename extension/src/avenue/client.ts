@@ -17,6 +17,7 @@
  * worth keeping true.
  */
 
+import { cached } from "./cache.js";
 import {
   type Brand,
   AvenueError,
@@ -212,14 +213,41 @@ export class AvenueClient {
     throw upstream(path, resp.status);
   }
 
+  /**
+   * Cache key for a GET.
+   *
+   * Includes the institution: two schools can have an org unit 1234, and
+   * serving one student the other's course list would be the worst bug in the
+   * codebase. The version segment is deliberately NOT in the path used for
+   * rule matching — it changes per school and would break every pattern.
+   */
+  private cacheKey(
+    instId: string,
+    component: Component,
+    suffix: string,
+    params?: Record<string, string | number | undefined>,
+  ): string {
+    const query = Object.entries(params ?? {})
+      .filter(([, v]) => v !== undefined && v !== null && v !== "")
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => `${k}=${v}`)
+      .join("&");
+    return `${instId}|${component}/${suffix.replace(/^\//, "")}${query ? `?${query}` : ""}`;
+  }
+
   /** GET a versioned route. */
   async get(
     component: Component,
     suffix: string,
     params?: Record<string, string | number | undefined>,
+    opts: { force?: boolean } = {},
   ): Promise<unknown> {
     const target = await this.target();
-    return this.rawJson("GET", await this.path(component, suffix), params, target);
+    return cached(
+      this.cacheKey(target.inst.id, component, suffix, params),
+      async () => this.rawJson("GET", await this.path(component, suffix), params, target),
+      opts,
+    );
   }
 
   /**
@@ -233,33 +261,45 @@ export class AvenueClient {
     suffix: string,
     params?: Record<string, string | number | undefined>,
     maxPages = 50,
+    opts: { force?: boolean } = {},
   ): Promise<unknown[]> {
     const target = await this.target();
-    const path = await this.path(component, suffix);
-    const items: unknown[] = [];
-    let bookmark: string | undefined;
 
-    for (let page = 0; page < maxPages; page++) {
-      const data = await this.rawJson("GET", path, { ...params, bookmark }, target);
+    // Cached as the FULLY PAGED result, not page by page. Caching individual
+    // pages would leave a half-walked list in the store if a later page failed,
+    // and a truncated course list that looks complete is exactly the kind of
+    // quiet wrongness the paging loop exists to prevent.
+    return cached(
+      this.cacheKey(target.inst.id, component, suffix, params),
+      async () => {
+        const path = await this.path(component, suffix);
+        const items: unknown[] = [];
+        let bookmark: string | undefined;
 
-      if (Array.isArray(data)) {
-        items.push(...data);
-        break; // unpaged route
-      }
-      if (typeof data !== "object" || data === null) break;
+        for (let page = 0; page < maxPages; page++) {
+          const data = await this.rawJson("GET", path, { ...params, bookmark }, target);
 
-      const obj = data as Record<string, unknown>;
-      const chunk = obj["Items"] ?? obj["Objects"];
-      if (Array.isArray(chunk)) items.push(...chunk);
+          if (Array.isArray(data)) {
+            items.push(...data);
+            break; // unpaged route
+          }
+          if (typeof data !== "object" || data === null) break;
 
-      const paging = (obj["PagingInfo"] ?? {}) as Record<string, unknown>;
-      const next = paging["Bookmark"];
-      const hasMore = Boolean(paging["HasMoreItems"]);
-      if (!hasMore || typeof next !== "string" || next === bookmark) break;
-      bookmark = next;
-    }
+          const obj = data as Record<string, unknown>;
+          const chunk = obj["Items"] ?? obj["Objects"];
+          if (Array.isArray(chunk)) items.push(...chunk);
 
-    return items;
+          const paging = (obj["PagingInfo"] ?? {}) as Record<string, unknown>;
+          const next = paging["Bookmark"];
+          const hasMore = Boolean(paging["HasMoreItems"]);
+          if (!hasMore || typeof next !== "string" || next === bookmark) break;
+          bookmark = next;
+        }
+
+        return items;
+      },
+      opts,
+    );
   }
 
   /** Active school's origin, for resolving relative links in HTML bodies. */

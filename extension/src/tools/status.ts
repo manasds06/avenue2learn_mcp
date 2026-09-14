@@ -11,6 +11,7 @@
  * wall that will never move.
  */
 
+import { cacheStatus } from "../avenue/cache.js";
 import { avenue } from "../avenue/client.js";
 import { AvenueError } from "../avenue/errors.js";
 import { CAPABILITY_KEYS, capability, originPattern } from "../institutions.js";
@@ -68,6 +69,10 @@ export async function getStatus() {
     session: { signed_in: signedIn, detail: signInDetail },
     api_key_set: (await getApiKey()) !== null,
     index,
+    // Visible on purpose. "How old is this number?" is the first question when
+    // something looks wrong, and an invisible cache makes it unanswerable.
+    // Grades and submissions are never in here — see avenue/cache.ts.
+    cache: await cacheStatus(),
     // What a probe MEASURED on this instance — "unverified" where nobody has
     // looked. Never generalize one school's results to another.
     known_restrictions: Object.fromEntries(

@@ -30,12 +30,14 @@ await mkdir(outdir, { recursive: true });
 const options = {
   entryPoints: {
     "background/worker": "src/background/worker.ts",
-    "ui/sidepanel": "src/ui/sidepanel.ts",
+    "ui/sidepanel": "src/ui/main.tsx",
   },
   outdir,
   bundle: true,
   format: "esm",
   target: "chrome116",
+  jsx: "automatic",
+  jsxImportSource: "preact",
   sourcemap: watch ? "inline" : false,
   minify: !watch,
   logLevel: "info",
@@ -49,10 +51,23 @@ async function copyStatic() {
 
   await mkdir(`${outdir}/ui`, { recursive: true });
   await cp("src/ui/sidepanel.html", `${outdir}/ui/sidepanel.html`);
-  await cp("src/ui/sidepanel.css", `${outdir}/ui/sidepanel.css`);
+  // theme.css is tokens only; app.css styles the components from them.
+  await cp("src/ui/theme.css", `${outdir}/ui/theme.css`);
+  await cp("src/ui/app.css", `${outdir}/ui/app.css`);
+
+  await mkdir(`${outdir}/vendor`, { recursive: true });
+
+  // Optional bundled typefaces. The design specifies Public Sans and JetBrains
+  // Mono; an MV3 page may not fetch a remote font, and adding a font host would
+  // break the two-host guarantee guarantees.test.ts pins. So drop
+  // PublicSans.woff2 and JetBrainsMono.woff2 into vendor-fonts/ to get the
+  // specified faces — theme.css falls through to the local stack without them,
+  // which is a supported state, not a broken one.
+  if (existsSync("vendor-fonts")) {
+    await cp("vendor-fonts", `${outdir}/vendor/fonts`, { recursive: true });
+  }
 
   // pdf.js worker
-  await mkdir(`${outdir}/vendor`, { recursive: true });
   // Copied as .js, NOT .mjs: Chrome serves extension files by extension, and a
   // module worker fetched from a .mjs URL is rejected on MIME grounds.
   await cp(

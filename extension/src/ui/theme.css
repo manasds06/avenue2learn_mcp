@@ -1,0 +1,195 @@
+/**
+ * Design tokens, from design_handoff_brightspace_assistant.
+ *
+ * THREE VALUES DRIVE THE WHOLE PANEL: --accent, --accent-soft, --accent-ink.
+ * They are written at runtime from the selected school (see theme.ts), and
+ * everything else here is a `color-mix` of them. That is the point — a new
+ * school is three hex values in institutions.ts and nothing else, and the
+ * borders, dividers, tints and shadows re-tint to it automatically.
+ *
+ * The handoff specifies McMaster's borders as rgba(122,0,60,.14) — maroon at
+ * 14%, not neutral grey. Hardcoding those literals would have made every other
+ * school's chrome McMaster-tinted, which is the exact error the skin exists to
+ * prevent, so they are expressed as percentages of --accent instead.
+ *
+ * SIZED FOR THE SIDE PANEL — the handoff fixes 400px; the real panel is
+ * roughly 320–500. Single column, nothing that scrolls sideways.
+ */
+
+:root {
+  /* --- skin: overwritten per institution at boot --- */
+  --accent: #7a003c;
+  --accent-soft: #fdbf57;
+  --accent-ink: #5c2a00;
+
+  /* --- derived from the skin. Do not hardcode a school's colour below. --- */
+  --line: color-mix(in srgb, var(--accent) 14%, transparent);
+  --line-strong: color-mix(in srgb, var(--accent) 22%, transparent);
+  --line-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+  --divider: color-mix(in srgb, var(--accent) 8%, transparent);
+  --pill-line: color-mix(in srgb, var(--accent) 25%, transparent);
+  --accent-wash: color-mix(in srgb, var(--accent) 6%, transparent);
+  --shadow: 0 1px 2px color-mix(in srgb, var(--accent) 6%, transparent);
+  --on-accent: #ffffff;
+
+  /* --- neutrals --- */
+  --bg: #fbf8f6;
+  --surface: #ffffff;
+  --surface-2: color-mix(in srgb, var(--accent) 4%, #ffffff);
+
+  --fg: #211a1d;
+  --fg-muted: rgb(33 26 29 / 60%);
+  --fg-tertiary: rgb(33 26 29 / 45%);
+  --fg-faint: rgb(33 26 29 / 35%);
+  --fg-placeholder: rgb(33 26 29 / 38%);
+
+  /* --- semantic. Deliberately NOT skinned: "overdue" must not read as
+         "on brand", and a school whose colour is red would otherwise make
+         every neutral badge look like a warning. --- */
+  --ok: #1f7a3d;
+  --ok-soft: color-mix(in srgb, #1f7a3d 12%, transparent);
+  --warn: #9a6400;
+  --warn-soft: color-mix(in srgb, #9a6400 14%, transparent);
+  --danger: #b3261e;
+  --danger-soft: color-mix(in srgb, #b3261e 10%, transparent);
+  /* "We don't know" is its own state, not an error. Neutral on purpose: an
+     unchecked submission is a gap, not a failure. */
+  --unknown: #6a6b73;
+  --unknown-soft: color-mix(in srgb, #6a6b73 12%, transparent);
+
+  /* --- spacing, from the handoff's scale --- */
+  --s1: 4px;
+  --s2: 6px;
+  --s3: 8px;
+  --s4: 10px;
+  --s5: 13px;
+  --s6: 14px;
+  --s7: 16px;
+  --s8: 20px;
+
+  --r-pill: 7px;
+  --r-btn: 9px;
+  --r-sm: 10px;
+  --r-md: 11px;
+  --r-lg: 12px;
+  --r-badge: 99px;
+
+  /* --- type ---
+     Public Sans and JetBrains Mono are the specified faces. They are NOT
+     fetched: an MV3 page may not load a remote font, and adding a font host
+     would break the two-host guarantee that guarantees.test.ts pins. Drop the
+     woff2 files into vendor-fonts/ and `npm run build` picks them up (see the
+     @font-face block below); until then the local stack renders at the same
+     metrics closely enough that spacing holds. */
+  --font: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  --t-xxs: 10.5px;
+  --t-xs: 11px;
+  --t-sm: 11.5px;
+  --t-md: 12.5px;
+  --t-base: 13px;
+  --t-lg: 13.5px;
+  --t-xl: 14px;
+}
+
+/* Optional bundled faces. A missing file falls through to the local stack
+   without erroring, so shipping without them is a supported state. */
+@font-face {
+  font-family: "Public Sans";
+  font-weight: 400 600;
+  font-display: swap;
+  src:
+    local("Public Sans"),
+    url("../vendor/fonts/PublicSans.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-weight: 400 500;
+  font-display: swap;
+  src:
+    local("JetBrains Mono"),
+    url("../vendor/fonts/JetBrainsMono.woff2") format("woff2");
+}
+
+/**
+ * Dark mode.
+ *
+ * The handoff is light-only, so this is an extrapolation rather than a spec:
+ * surfaces invert, the accent stays the accent, and the derived mixes are
+ * re-based so a 14%-of-maroon border is still visible on a dark ground. The
+ * panel supported dark before the redesign and silently dropping that would be
+ * a regression for anyone running a dark OS.
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17141a;
+    --surface: #201c24;
+    --surface-2: #29242e;
+
+    --fg: #f0ecef;
+    --fg-muted: rgb(240 236 239 / 62%);
+    --fg-tertiary: rgb(240 236 239 / 48%);
+    --fg-faint: rgb(240 236 239 / 36%);
+    --fg-placeholder: rgb(240 236 239 / 40%);
+
+    --line: rgb(255 255 255 / 12%);
+    --line-strong: rgb(255 255 255 / 20%);
+    --line-soft: rgb(255 255 255 / 9%);
+    --divider: rgb(255 255 255 / 8%);
+    --pill-line: color-mix(in srgb, var(--accent) 55%, transparent);
+    --accent-wash: color-mix(in srgb, var(--accent) 22%, transparent);
+    --shadow: 0 1px 2px rgb(0 0 0 / 35%);
+  }
+
+  /* The deep brand colours are unreadable as text on a dark ground; lift them
+     for anything drawn as a foreground. Chrome (title bar, buttons) keeps the
+     true colour, where white text still carries it. */
+  :root {
+    --accent-text: color-mix(in srgb, var(--accent) 55%, #ffffff);
+  }
+}
+
+:root {
+  --accent-text: var(--accent);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font: 400 var(--t-base) / 1.5 var(--font);
+  color: var(--fg);
+  background: var(--bg);
+  /* The panel is narrow; a stray wide child must never push the page. */
+  overflow-x: hidden;
+}
+
+a {
+  color: var(--accent-text);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-btn);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

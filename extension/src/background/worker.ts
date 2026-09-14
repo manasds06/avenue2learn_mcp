@@ -20,6 +20,23 @@ export interface ToolRequest {
   args?: Record<string, unknown>;
 }
 
+/** Sent by the side panel when it mounts. See onPanelOpened. */
+export interface PanelOpenedMessage {
+  type: "panel-opened";
+}
+
+/**
+ * Sent by Setup's "Refresh all data".
+ *
+ * Must be handled HERE, not in the panel: the panel and the worker each hold
+ * their own in-memory copy, and clearing only the panel's would leave the
+ * worker — which serves every Brightspace route — still answering from the
+ * entries the user just asked to throw away.
+ */
+export interface ClearCacheMessage {
+  type: "clear-cache";
+}
+
 export type ToolResponse =
   | { ok: true; result: unknown }
   | { ok: false; error: string; message: string; next_step?: string };
@@ -67,11 +84,28 @@ export async function runTool(
   }
 }
 
-chrome.runtime.onMessage.addListener((msg: ToolRequest, _sender, sendResponse) => {
-  if (msg?.type !== "tool") return false;
-  void runTool(msg.name, msg.args ?? {}).then(sendResponse);
-  return true; // keep the channel open for the async reply
-});
+chrome.runtime.onMessage.addListener(
+  (msg: ToolRequest | PanelOpenedMessage | ClearCacheMessage, _sender, sendResponse) => {
+    if (msg?.type === "panel-opened") {
+      // Opening the panel is the moment someone expects current information.
+      // Grades, quiz attempts and submissions are dropped; the slow structural
+      // reads that make the panel feel instant are kept.
+      void import("../avenue/cache.js").then(async ({ onPanelOpened }) =>
+        sendResponse({ ok: true, dropped: await onPanelOpened() }),
+      );
+      return true;
+    }
+    if (msg?.type === "clear-cache") {
+      void import("../avenue/cache.js").then(async ({ clearCache }) =>
+        sendResponse({ ok: true, cleared: await clearCache() }),
+      );
+      return true;
+    }
+    if (msg?.type !== "tool") return false;
+    void runTool(msg.name, msg.args ?? {}).then(sendResponse);
+    return true; // keep the channel open for the async reply
+  },
+);
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });

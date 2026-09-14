@@ -3,61 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <title>Brightspace Assistant</title>
-    <link rel="stylesheet" href="sidepanel.css" />
+    <link rel="stylesheet" href="theme.css" />
+    <link rel="stylesheet" href="app.css" />
   </head>
   <body>
-    <header>
-      <h1>Brightspace Assistant</h1>
-      <button id="toggle-setup" type="button" class="link">Setup</button>
-    </header>
-
-    <section id="setup" hidden>
-      <label for="school">Your school</label>
-      <select id="school"></select>
-
-      <div id="grant-row" hidden>
-        <p class="hint" id="grant-hint"></p>
-        <button id="grant" type="button">Allow access</button>
-      </div>
-
-      <label for="model">Model</label>
-      <div class="key-row">
-        <input id="model" list="model-options" autocomplete="off" spellcheck="false"
-               placeholder="gemini-2.5-flash" />
-        <button id="save-model" type="button" class="secondary">Use</button>
-      </div>
-      <datalist id="model-options"></datalist>
-      <p class="hint" id="model-hint"></p>
-      <p class="hint" id="index-hint"></p>
-
-      <label for="apikey">Gemini API key</label>
-      <div class="key-row">
-        <input id="apikey" type="password" autocomplete="off" spellcheck="false"
-               placeholder="AIza…" />
-        <button id="save-key" type="button" class="secondary">Save</button>
-      </div>
-      <p class="hint" id="key-hint"></p>
-
-
-      <details id="devtools">
-        <summary>Run a tool directly</summary>
-        <label for="tool">Tool</label>
-        <select id="tool"></select>
-        <p class="hint" id="tool-desc"></p>
-        <label for="args">Arguments (JSON)</label>
-        <textarea id="args" rows="3" spellcheck="false"></textarea>
-        <button id="run" type="button" class="secondary">Run tool</button>
-      </details>
-    </section>
-
-    <div id="thread" aria-live="polite"></div>
-
-    <form id="composer">
-      <textarea id="question" rows="2" spellcheck="false"
-                placeholder="What's due in the next two weeks?"></textarea>
-      <button id="send" type="submit">Ask</button>
-    </form>
-
+    <div id="root"></div>
     <script type="module" src="sidepanel.js"></script>
   </body>
 </html>

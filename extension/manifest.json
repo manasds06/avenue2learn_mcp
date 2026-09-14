@@ -14,7 +14,8 @@
   "optional_host_permissions": [
     "https://avenue.cllmcmaster.ca/*",
     "https://avenue.mcmaster.ca/*",
-    "https://brightspace.carleton.ca/*"
+    "https://brightspace.carleton.ca/*",
+    "https://westernu.brightspace.com/*"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

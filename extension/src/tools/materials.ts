@@ -53,6 +53,52 @@ export async function searchCourseMaterials(args: {
   const docs = await listDocuments();
   const indexed = [...new Set(docs.map((d) => d.courseName))].sort();
 
+  /**
+   * Which files these passages came from, and how much of each was NOT
+   * returned.
+   *
+   * Retrieval returns fragments, and a fragment set can pin down the right
+   * document while missing the specific passage asked for — "which question is
+   * first on the 2025 exam" matched the cover page and questions 2, 4 and 6,
+   * because nothing in question 1's text says "first". Reported as eight hits
+   * with citations, that looks like a thorough search that found nothing, and
+   * the honest-sounding answer is "the exact text is not in the results".
+   *
+   * It was in the file the whole time. Naming the file, its page count, and the
+   * pages already seen turns a dead end into an obvious next call.
+   */
+  const matched = new Map<
+    string,
+    { org_unit_id: number; topic_id: number; file_name: string; pages_returned: string[] }
+  >();
+  for (const hit of hits) {
+    const c = hit.citation;
+    const key = `${c.org_unit_id}:${c.topic_id}`;
+    const row =
+      matched.get(key) ??
+      {
+        org_unit_id: c.org_unit_id,
+        topic_id: c.topic_id,
+        file_name: c.file_name,
+        pages_returned: [],
+      };
+    if (c.position && !row.pages_returned.includes(c.position)) {
+      row.pages_returned.push(c.position);
+    }
+    matched.set(key, row);
+  }
+
+  const documents = [...matched.values()].map((row) => {
+    const doc = docs.find(
+      (d) => d.orgUnitId === row.org_unit_id && d.topicId === row.topic_id,
+    );
+    return { ...row, page_count: doc?.pageCount ?? null };
+  });
+
+  const partial = documents.filter(
+    (d) => d.page_count !== null && d.pages_returned.length < d.page_count,
+  );
+
   return {
     query: args.query,
     results: hits,
@@ -62,11 +108,20 @@ export async function searchCourseMaterials(args: {
     // Keyword-only still works if the model could not load; say so rather than
     // quietly returning weaker results.
     semantic_search_used: usedVectors,
-    note: indexed.length
-      ? usedVectors
-        ? null
-        : "Semantic search was unavailable, so these are keyword matches only. Paraphrased questions may miss."
-      : "Nothing has been indexed yet. Run sync_course_materials for a course first — there is nothing to search.",
+    documents_matched: documents,
+    note: !indexed.length
+      ? "Nothing has been indexed yet. Run sync_course_materials for a course first — there is nothing to search."
+      : !usedVectors
+        ? "Semantic search was unavailable, so these are keyword matches only. Paraphrased questions may miss."
+        : partial.length
+          ? `These are excerpts, not whole files. ${partial
+              .map(
+                (d) =>
+                  `${d.file_name} has ${d.page_count} pages and only ${d.pages_returned.length} were returned (topic_id ${d.topic_id})`,
+              )
+              .join("; ")}. If the passage you need is not here, read the file with ` +
+            `read_content_file before saying it could not be found — the answer is often on a page that did not match the wording of the question.`
+          : null,
   };
 }
 

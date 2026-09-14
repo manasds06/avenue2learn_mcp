@@ -144,11 +144,41 @@ describe("failures are not cached as facts", () => {
     expect(source).toMatch(/course name could not be resolved/i);
   });
 
+  it("the digest does not re-run the whole deadline sweep per course", () => {
+    // It did, once: getUpcomingDeadlines() sweeps every course, and calling it
+    // inside the per-course loop made a 21-course digest do the 21-course sweep
+    // 21 times. Home waits on this. The Python original has always used one
+    // course's calendar here (_deadlines -> _calendar_events).
+    const source = ts("tools/whatsnew.ts");
+    // Asserted on the import rather than the call, so the comment explaining
+    // this in whatsnew.ts can name the function it warns against.
+    expect(source).not.toMatch(/^import .*from "\.\/assignments\.js";$/m);
+    expect(source).toContain("calendarEvents(oid");
+  });
+
+  it("the per-course sweeps run concurrently, as the Python ones do", () => {
+    // asyncio.gather on the Python side; a sequential for-await in the port
+    // turned a second into a minute.
+    for (const file of ["tools/whatsnew.ts", "tools/assignments.ts"]) {
+      expect(ts(file), file).toContain("mapPool");
+    }
+  });
+
+  it("a partial search result is not allowed to read as a complete one", () => {
+    // Retrieval returns fragments. A fragment set can identify the right file
+    // and still miss the passage asked for — which then gets reported as "not
+    // in the search results", a sentence that sounds careful and is wrong.
+    // Both the tool and the prompt have to name the escalation.
+    expect(ts("tools/materials.ts")).toContain("documents_matched");
+    expect(ts("tools/registry.ts")).toMatch(/RESULTS ARE EXCERPTS, NOT WHOLE FILES/);
+    expect(ts("llm/gemini.ts")).toMatch(/search_course_materials returns EXCERPTS/);
+  });
+
   it("model suggestions come from the key, not a hardcoded guess", () => {
     const source = ts("llm/gemini.ts");
     // Offering a model the account lacks turns "rate-limited" into
     // "rate-limited AND the suggested fix errors".
     expect(source).toContain("availableModels");
-    expect(ts("ui/sidepanel.ts")).toContain("refreshModelSuggestions");
+    expect(ts("ui/views/Setup.tsx")).toContain("availableModels()");
   });
 });

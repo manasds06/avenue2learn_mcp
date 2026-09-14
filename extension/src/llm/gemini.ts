@@ -106,7 +106,16 @@ function dropStaleImages(contents: Content[]): void {
     }
   }
 }
-interface Content {
+/**
+ * Exported so the chat view can carry a conversation forward.
+ *
+ * What it should carry is only the question/answer pairs — NOT the tool rounds.
+ * Tool results are the bulky part (a search returns eight passages), and the
+ * whole conversation is resent on every turn, so replaying them would make each
+ * follow-up cost more than the question before it. Dropping them means the
+ * model re-calls a tool if it needs the data again, which is cheap and current.
+ */
+export interface Content {
   role: "user" | "model";
   parts: Part[];
 }
@@ -135,6 +144,11 @@ function systemPrompt(lmsName: string, credentialBrand: string): string {
     `- When a tool fails, call get_status before telling the user to sign in. It`,
     `  distinguishes "not signed in" from "this route is restricted for students",`,
     `  which need completely different advice.`,
+    `- search_course_materials returns EXCERPTS. When the passages come from the right`,
+    `  file but do not contain what was asked, read that file with read_content_file`,
+    `  (the topic_id is in the citation) instead of answering "it is not in the results".`,
+    `  A search misses when the wording differs — an exam question does not say`,
+    `  "first question", it just says "1." — and the text is usually there to be read.`,
     ``,
     `HOW TO ANSWER:`,
     `- Quote deadline times using the "local" field, NEVER the "utc" one. These are`,

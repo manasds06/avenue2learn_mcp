@@ -19,6 +19,7 @@ import { avenue } from "../avenue/client.js";
 import { AvenueError } from "../avenue/errors.js";
 import { addDays, daysUntil, describe, nowUtc, parseD2L, toUtcIso } from "../avenue/dates.js";
 import { asFloat, asInt, isObj, pick, richText, toText, truncate } from "../avenue/models.js";
+import { COURSE_CONCURRENCY, DETAIL_CONCURRENCY, mapPool } from "../avenue/pool.js";
 import { describeDenial } from "../institutions.js";
 import { getCurrentInstitution } from "../settings.js";
 import { calendarEvents } from "./calendar.js";
@@ -199,17 +200,21 @@ export async function getUpcomingDeadlines(args: {
   const windowEnd = addDays(now, daysAhead);
 
   const { courses } = await listCourses({});
-  const deadlines: Array<Record<string, unknown>> = [];
-  let anyStatus = false;
 
-  for (const course of courses) {
+  // One course at a time meant 21 calendars, then 21 folder listings, then a
+  // submission check per dated folder — every one of them waiting on the last.
+  // Each course's rows are built in their own array so the title de-duplication
+  // below stays within a course and does not depend on arrival order.
+  const perCourse = await mapPool(courses, COURSE_CONCURRENCY, async (course) => {
     const oid = course.org_unit_id;
+    const rows: Array<Record<string, unknown>> = [];
+    let sawStatus = false;
 
     // Calendar first: it covers quizzes and anything else an instructor dated.
     try {
       for (const ev of await calendarEvents(oid, { daysBack: 0, daysAhead })) {
         if (ev.dueAt < now || ev.dueAt > windowEnd) continue;
-        deadlines.push({
+        rows.push({
           course_name: course.name,
           org_unit_id: oid,
           title: ev.title,
@@ -225,26 +230,33 @@ export async function getUpcomingDeadlines(args: {
 
     // Then assignment folders, which carry points and real status.
     try {
-      for (const folder of await avenue.getPaged("le", `${oid}/dropbox/folders/`)) {
-        if (!isObj(folder)) continue;
-        const fid = asInt(pick(folder, "Id", "FolderId"));
-        const due = parseD2L(pick(folder, "DueDate", "Due"));
-        if (fid === null || !due || due < now || due > windowEnd) continue;
+      const dated = (await avenue.getPaged("le", `${oid}/dropbox/folders/`))
+        .filter(isObj)
+        .map((folder) => ({
+          folder,
+          fid: asInt(pick(folder, "Id", "FolderId")),
+          due: parseD2L(pick(folder, "DueDate", "Due")),
+        }))
+        .filter((f) => f.fid !== null && f.due && f.due >= now && f.due <= windowEnd);
 
-        const sub = await mySubmission(oid, fid);
+      // The submission checks are the bulk of the requests for a busy course.
+      const subs = await mapPool(dated, DETAIL_CONCURRENCY, (f) =>
+        mySubmission(oid, f.fid!),
+      );
+
+      for (const [i, { folder, fid, due }] of dated.entries()) {
+        const sub = subs[i]!;
         // THREE outcomes. UNAVAILABLE must not read as "submitted", or these
         // get filtered out below and the answer silently empties.
         let status: string;
         if (sub === UNAVAILABLE) status = "unknown";
         else if (sub !== null) status = "submitted";
         else status = "not_submitted";
-        if (status !== "unknown") anyStatus = true;
+        if (status !== "unknown") sawStatus = true;
 
         const title = String(pick(folder, "Name", "Title") ?? "");
-        const existing = deadlines.find(
-          (d) =>
-            d["org_unit_id"] === oid &&
-            String(d["title"] ?? "").trim().toLowerCase() === title.trim().toLowerCase(),
+        const existing = rows.find(
+          (d) => String(d["title"] ?? "").trim().toLowerCase() === title.trim().toLowerCase(),
         );
 
         if (existing) {
@@ -255,13 +267,13 @@ export async function getUpcomingDeadlines(args: {
           existing["points_possible"] = asFloat(pick(folder, "OutOf", "PointsPossible"));
           existing["folder_id"] = fid;
         } else {
-          deadlines.push({
+          rows.push({
             course_name: course.name,
             org_unit_id: oid,
             title,
             type: "assignment",
-            due_date: describe(due),
-            days_until: daysUntil(due, now),
+            due_date: describe(due!),
+            days_until: daysUntil(due!, now),
             submission_status: status,
             points_possible: asFloat(pick(folder, "OutOf", "PointsPossible")),
             folder_id: fid,
@@ -271,7 +283,12 @@ export async function getUpcomingDeadlines(args: {
     } catch {
       // Folder listing denied for this course; calendar entries still stand.
     }
-  }
+
+    return { rows, sawStatus };
+  });
+
+  const deadlines = perCourse.flatMap((c) => c.rows);
+  const anyStatus = perCourse.some((c) => c.sawStatus);
 
   const visible = includeSubmitted
     ? deadlines

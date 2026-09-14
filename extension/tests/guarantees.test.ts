@@ -16,7 +16,9 @@ function sourceFiles(dir: string, acc: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     const full = join(dir, name);
     if (statSync(full).isDirectory()) sourceFiles(full, acc);
-    else if (full.endsWith(".ts")) acc.push(full);
+    // .tsx too: once the UI moved to components, most of the code that could
+    // plausibly touch a cookie or a remote host stopped being .ts.
+    else if (full.endsWith(".ts") || full.endsWith(".tsx")) acc.push(full);
   }
   return acc;
 }
@@ -45,6 +47,41 @@ describe("we never touch the session cookie", () => {
     expect(manifest.permissions).not.toContain("cookies");
     // Requesting it would also fail Web Store review scrutiny for no benefit:
     // the browser attaches the cookie for us, so we never need to read it.
+  });
+});
+
+/**
+ * The load-bearing claim of the multi-view UI: glancing at your deadlines costs
+ * nothing and works with no API key. It stops being true the moment one view
+ * reaches for the model "just for this bit", and nothing about that change
+ * would look wrong in review — so it is pinned here instead.
+ */
+describe("the data views cost no tokens", () => {
+  const VIEWS = join(ROOT, "src/ui/views");
+
+  it("only the chat view talks to the LLM", () => {
+    const offenders = readdirSync(VIEWS)
+      .filter((f) => f !== "Chat.tsx" && f !== "Setup.tsx")
+      .filter((f) => /llm\/gemini/.test(code(join(VIEWS, f))));
+    expect(
+      offenders,
+      `these views import the LLM, so they would need an API key: ${offenders.join(", ")}`,
+    ).toEqual([]);
+  });
+
+  it("Setup imports the LLM only to list models, never to generate", () => {
+    // Setup does need it — that is how "which models does this key have?" gets
+    // answered — but calling ask() there would put a paid round trip behind
+    // opening a settings tab.
+    expect(code(join(VIEWS, "Setup.tsx"))).not.toMatch(/\bask\(/);
+  });
+
+  it("views read data through the shared tool layer, not the network", () => {
+    // A view that fetched Brightspace directly could drift from the rules the
+    // tools enforce, and "the honest answer" would depend on which surface you
+    // happened to look at.
+    const offenders = readdirSync(VIEWS).filter((f) => /\bfetch\(/.test(code(join(VIEWS, f))));
+    expect(offenders, `direct fetch in: ${offenders.join(", ")}`).toEqual([]);
   });
 });
 

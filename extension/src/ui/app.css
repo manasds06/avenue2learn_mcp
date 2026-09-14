@@ -1,0 +1,1135 @@
+/**
+ * Component styles, from design_handoff_brightspace_assistant.
+ *
+ * Every colour here is a token from theme.css — no literal hex, no literal
+ * rgba(122,0,60,…). The handoff writes McMaster's borders as maroon at 14%;
+ * pasting those literals would have baked one school's colour into every other
+ * school's chrome, which is exactly what the skin exists to prevent. They are
+ * `--line`, `--divider`, `--pill-line`, all mixed from `--accent` at runtime.
+ *
+ * Written for a 320–500px side panel (the handoff fixes 400). Single column,
+ * and NOTHING may scroll sideways — long file names and course titles are the
+ * usual offenders, so anything that can be long wraps or gets `min-width: 0`.
+ */
+
+/* --- shell ---------------------------------------------------------------- */
+
+#root,
+.app {
+  height: 100%;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  padding: 11px var(--s6);
+  background: var(--accent);
+  flex: none;
+}
+
+.titlebar-mark {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  display: grid;
+  place-items: center;
+  font: 700 var(--t-xs) / 1 var(--font);
+}
+
+.titlebar-name {
+  margin: 0;
+  font: 600 var(--t-base) / 1.2 var(--font);
+  color: var(--on-accent);
+}
+
+.schoolstrip {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: var(--s3) var(--s6);
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-soft);
+  font: 500 var(--t-xs) / 1.4 var(--font);
+  color: var(--fg-muted);
+  flex: none;
+}
+
+.schoolstrip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-badge);
+  background: var(--accent-soft);
+  flex: none;
+}
+
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.view {
+  padding: var(--s7) var(--s6) var(--s8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s8);
+}
+
+.chat-host {
+  height: 100%;
+}
+.chat-host[hidden] {
+  display: none;
+}
+
+.tabbar {
+  display: flex;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  flex: none;
+}
+
+.tabbar-btn {
+  flex: 1;
+  padding: 11px 0 12px;
+  border: 0;
+  background: none;
+  color: var(--fg-muted);
+  font: 400 var(--t-md) / 1.2 var(--font);
+  text-align: center;
+  cursor: pointer;
+}
+
+.tabbar-btn:hover {
+  color: var(--fg);
+}
+
+.tabbar-active {
+  color: var(--accent-text);
+  font-weight: 600;
+  /* The handoff's top indicator: an inset shadow, so the button does not shift
+     by a border's height when it becomes active. */
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+/* Renders only when something is actually wrong, so it may be loud. */
+.strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  width: 100%;
+  padding: var(--s3) var(--s6);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  font: 500 var(--t-sm) / 1.4 var(--font);
+  text-align: left;
+  cursor: pointer;
+  flex: none;
+}
+
+.strip-warn {
+  background: var(--warn-soft);
+  color: var(--fg);
+}
+
+.strip-action {
+  color: var(--accent-text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* --- primitives ----------------------------------------------------------- */
+
+.btn {
+  padding: var(--s4) var(--s6);
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: var(--on-accent);
+  font: 600 var(--t-md) / 1.2 var(--font);
+  cursor: pointer;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* The handoff's pill: a quiet outlined action next to a section label. */
+.btn-sm,
+.btn-quiet {
+  padding: var(--s1) 9px;
+  border: 1px solid var(--pill-line);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--accent-text);
+  font: 500 var(--t-sm) / 1.3 var(--font);
+}
+
+.btn-quiet:hover:not(:disabled) {
+  background: var(--accent-wash);
+}
+
+.input {
+  width: 100%;
+  min-width: 0;
+  padding: var(--s4) var(--s5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font: 400 var(--t-md) / 1.4 var(--mono);
+  box-shadow: var(--shadow);
+}
+
+.input::placeholder {
+  color: var(--fg-placeholder);
+}
+
+textarea.input {
+  resize: vertical;
+}
+
+.row {
+  display: flex;
+  gap: var(--s3);
+  align-items: center;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+.stack-tight {
+  gap: var(--s3);
+}
+
+.hint {
+  margin: var(--s2) 0 0;
+  color: var(--fg-muted);
+  font: 400 var(--t-sm) / 1.5 var(--font);
+  text-wrap: pretty;
+}
+
+.hint-warn {
+  color: var(--warn);
+}
+
+/* Section label: 600 10.5px, .1em tracking, accent. */
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-bottom: 9px;
+}
+
+.section-title h2 {
+  margin: 0;
+  font: 600 var(--t-xxs) / 1.3 var(--font);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+}
+
+.card,
+.listcard {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  box-shadow: var(--shadow);
+}
+
+.card {
+  padding: var(--s5);
+}
+
+.listcard {
+  overflow: hidden;
+}
+
+.card-click {
+  cursor: pointer;
+}
+
+.card-click:hover {
+  border-color: var(--line-strong);
+}
+
+.card-accent {
+  border-left: 3px solid var(--accent);
+}
+
+/* Neutral status chip. Semantic tones are deliberately unskinned — see the
+   note in theme.css. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px var(--s3);
+  border-radius: var(--r-badge);
+  font: 600 var(--t-xxs) / 1.4 var(--font);
+  white-space: nowrap;
+  background: var(--surface-2);
+  color: var(--fg-muted);
+}
+
+.chip-ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.chip-warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.chip-danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.chip-accent {
+  background: var(--accent-wash);
+  color: var(--accent-text);
+}
+/* Deliberately not red. An unchecked submission is a gap, not a failure, and
+   colouring it as an error tells the student something is broken. */
+.chip-unknown {
+  background: var(--unknown-soft);
+  color: var(--unknown);
+  border: 1px dashed var(--line-strong);
+  cursor: help;
+}
+
+/* The gold highlight. ONLY ever a background for --accent-ink text. */
+.softpill,
+.countbadge {
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  border-radius: var(--r-badge);
+  white-space: nowrap;
+}
+
+.softpill {
+  padding: 2px 7px;
+  font: 500 var(--t-xxs) / 1.4 var(--font);
+}
+
+.countbadge {
+  padding: 2px var(--s3);
+  font: 600 var(--t-xs) / 1.4 var(--mono);
+}
+
+.empty {
+  padding: 18px var(--s7);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.empty-title {
+  margin: 0;
+  font: 600 var(--t-xl) / 1.3 var(--font);
+}
+
+.empty-detail {
+  margin: var(--s2) 0 0;
+  color: var(--fg-muted);
+  font: 400 12px / 1.55 var(--font);
+  text-wrap: pretty;
+}
+
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.skeleton-row {
+  height: 56px;
+  border-radius: var(--r-lg);
+  background: linear-gradient(90deg, var(--surface), var(--surface-2), var(--surface));
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.failure {
+  padding: var(--s5);
+  border: 1px solid var(--danger);
+  border-radius: var(--r-lg);
+  background: var(--danger-soft);
+}
+
+.failure-message {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* next_step is the actionable half of every error in this codebase; normal
+   weight, but never dropped. */
+.failure-next {
+  margin: var(--s1) 0 var(--s3);
+  font-size: var(--t-sm);
+}
+
+.tabs {
+  display: flex;
+  gap: var(--s1);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  padding: var(--s3) var(--s4);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--fg-muted);
+  font: 400 var(--t-md) / 1.3 var(--font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tab-active {
+  color: var(--accent-text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--s3);
+}
+
+.stat {
+  padding: var(--s4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.stat-value {
+  font: 600 18px / 1.2 var(--mono);
+  color: var(--accent-text);
+}
+
+.stat-label {
+  font: 400 var(--t-xxs) / 1.4 var(--font);
+  color: var(--fg-tertiary);
+}
+
+.weightbar {
+  display: flex;
+  height: 10px;
+  border-radius: var(--r-badge);
+  overflow: hidden;
+  background: var(--surface-2);
+}
+
+.weightseg {
+  background: var(--surface-2);
+  border-right: 1px solid var(--surface);
+}
+
+.weightseg-accent {
+  background: var(--accent);
+}
+.weightseg-ok {
+  background: var(--ok);
+}
+.weightseg-neutral {
+  background: var(--line-strong);
+}
+
+/* --- honesty -------------------------------------------------------------- */
+
+/* Given real weight on purpose: a withheld projection matters more than the
+   number it replaces. */
+.caveat {
+  padding: var(--s5);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: var(--warn-soft);
+}
+
+.caveat-quiet {
+  border-left-color: var(--unknown);
+  background: var(--unknown-soft);
+}
+
+.caveat-title {
+  display: block;
+  font-size: var(--t-sm);
+}
+
+.caveat-body {
+  font: 400 var(--t-sm) / 1.5 var(--font);
+  color: var(--fg);
+  text-wrap: pretty;
+}
+
+.caveat-body ul {
+  margin: var(--s1) 0 0;
+  padding-left: var(--s7);
+}
+
+.notindexed {
+  padding: var(--s5);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-lg);
+  font: 400 var(--t-sm) / 1.5 var(--font);
+}
+
+.notindexed p {
+  margin: 0 0 var(--s3);
+  text-wrap: pretty;
+}
+
+/* --- deadlines ------------------------------------------------------------ */
+
+.deadline {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.deadline-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+
+.deadline-title {
+  font: 600 var(--t-md) / 1.35 var(--font);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.deadline-course {
+  font: 400 var(--t-xs) / 1.4 var(--font);
+  color: var(--accent-text);
+}
+
+.deadline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  font: 400 var(--t-xs) / 1.4 var(--font);
+  color: var(--fg-tertiary);
+}
+
+.deadline-status:empty {
+  display: none;
+}
+
+/* --- courses -------------------------------------------------------------- */
+
+.coursecard {
+  display: block;
+  width: 100%;
+  padding: 11px var(--s5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.coursecard:hover {
+  border-color: var(--line-strong);
+}
+
+/* An indexed course is searchable; the left rule is the fastest way to see
+   which ones are. */
+.coursecard-indexed {
+  border-left: 3px solid var(--accent);
+}
+
+.coursecard-top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+}
+
+.coursecard-code {
+  font: 600 var(--t-xs) / 1.4 var(--mono);
+  color: var(--fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.coursecard-indexed .coursecard-code {
+  color: var(--accent-text);
+}
+
+.coursecard-top > .softpill,
+.coursecard-unindexed {
+  margin-left: auto;
+}
+
+.coursecard-unindexed {
+  font: 400 var(--t-xs) / 1.4 var(--font);
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+
+.coursecard-title {
+  margin-top: var(--s1);
+  font: 600 var(--t-base) / 1.35 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.coursecard-past {
+  margin-top: var(--s2);
+}
+
+.coursehead {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  align-items: flex-start;
+}
+
+.coursehead-name {
+  margin: 0;
+  font: 600 var(--t-xl) / 1.3 var(--font);
+  overflow-wrap: anywhere;
+}
+
+/* --- grades / files / news ------------------------------------------------ */
+
+.graderow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.graderow-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+
+.graderow-name {
+  font: 600 var(--t-md) / 1.35 var(--font);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.graderow-score {
+  font: 600 var(--t-md) / 1.35 var(--mono);
+  color: var(--accent-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.graderow-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  font: 400 var(--t-xs) / 1.4 var(--font);
+  color: var(--fg-tertiary);
+}
+
+.graderow-feedback {
+  margin-top: var(--s1);
+  padding-left: var(--s3);
+  border-left: 2px solid var(--line-strong);
+  font: 400 var(--t-sm) / 1.5 var(--font);
+  color: var(--fg-muted);
+}
+
+.filerow-name {
+  font: 400 var(--t-md) / 1.4 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.newsrow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.newsrow-head {
+  display: flex;
+  flex-direction: column;
+}
+
+.newsrow-title {
+  font: 600 var(--t-md) / 1.35 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.newsrow-when {
+  font: 400 var(--t-xxs) / 1.4 var(--font);
+  color: var(--fg-faint);
+}
+
+.newsrow-body {
+  font: 400 var(--t-sm) / 1.5 var(--font);
+  color: var(--fg-muted);
+  /* Announcements can be long; keep the list scannable. */
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.newsrow-links {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--t-sm);
+  overflow-wrap: anywhere;
+}
+
+/* --- what's new ----------------------------------------------------------- */
+
+.changegroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+.changegroup + .changegroup {
+  margin-top: var(--s7);
+}
+
+.changegroup-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font: 600 var(--t-base) / 1.3 var(--font);
+}
+
+.changerow {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s4);
+  width: 100%;
+  padding: var(--s4) var(--s5);
+  border: 0;
+  border-bottom: 1px solid var(--divider);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.changerow:hover {
+  background: var(--accent-wash);
+}
+
+.changerow-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.changerow-title {
+  display: block;
+  font: 600 var(--t-md) / 1.35 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.changerow-course {
+  display: block;
+  margin-top: 2px;
+  font: 400 var(--t-xs) / 1.4 var(--font);
+  color: var(--fg-tertiary);
+}
+
+.changerow-value {
+  font: 600 var(--t-md) / 1.35 var(--mono);
+  color: var(--accent-text);
+  white-space: nowrap;
+}
+
+.changerow-more {
+  padding: 9px var(--s5);
+  font: 500 var(--t-sm) / 1.4 var(--font);
+  color: var(--accent-text);
+}
+
+/* --- citations ------------------------------------------------------------ */
+
+.citations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+.citation {
+  min-width: 0;
+}
+
+.citation-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s2);
+  max-width: 100%;
+  padding: 3px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-badge);
+  background: var(--surface);
+  color: var(--accent-text);
+  font: 400 var(--t-xxs) / 1.5 var(--font);
+  text-align: left;
+  cursor: pointer;
+}
+
+.citation-open .citation-chip {
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+}
+
+.citation-file {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.citation-pos {
+  color: var(--fg-tertiary);
+  white-space: nowrap;
+}
+
+.citation-body {
+  padding: var(--s4);
+  border: 1px solid var(--line-strong);
+  border-top: 0;
+  border-radius: 0 0 var(--r-sm) var(--r-sm);
+  background: var(--surface);
+}
+
+.citation-where {
+  font: 400 var(--t-xxs) / 1.4 var(--font);
+  color: var(--fg-faint);
+  overflow-wrap: anywhere;
+}
+
+.citation-text {
+  margin: var(--s3) 0;
+  padding-left: var(--s3);
+  border-left: 2px solid var(--accent);
+  font: 400 var(--t-sm) / 1.55 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.citation-image {
+  display: block;
+  width: 100%;
+  margin-top: var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+}
+
+.citation-error {
+  margin: var(--s3) 0 0;
+  font-size: var(--t-sm);
+  color: var(--danger);
+}
+
+/* --- chat ----------------------------------------------------------------- */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s7) var(--s6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s6);
+}
+
+.msg {
+  font: 400 var(--t-lg) / 1.6 var(--font);
+  overflow-wrap: anywhere;
+}
+
+.msg p {
+  margin: 0 0 var(--s4);
+  text-wrap: pretty;
+}
+
+.msg p:last-child {
+  margin-bottom: 0;
+}
+
+.msg ul {
+  margin: 0 0 var(--s4);
+  padding-left: var(--s7);
+}
+
+/* The only bubble in the design. The answer is full-width prose. */
+.msg.you {
+  align-self: flex-end;
+  max-width: 82%;
+  padding: 9px var(--s5);
+  /* Square-ish corner on the sender's side, per the handoff. */
+  border-radius: 14px 14px var(--s1) 14px;
+  background: var(--accent);
+  color: var(--on-accent);
+  line-height: 1.45;
+}
+
+.msg.err {
+  padding: var(--s4) var(--s5);
+  border: 1px solid var(--danger);
+  border-radius: var(--r-md);
+  background: var(--danger-soft);
+  font-size: var(--t-base);
+}
+
+/* One line per tool, with the gold dot. Also the audit trail: an answer with
+   no search line did not read your files. */
+.toolline {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-bottom: var(--s4);
+  font: 500 var(--t-xs) / 1.5 var(--mono);
+  color: var(--fg-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.toolline-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--r-badge);
+  background: var(--accent-soft);
+  flex: none;
+}
+
+.toolline-err .toolline-dot {
+  background: var(--danger);
+}
+
+.msg-artifact {
+  margin-top: var(--s4);
+}
+
+.trace {
+  margin-top: var(--s4);
+  font: 400 var(--t-xxs) / 1.5 var(--font);
+  color: var(--fg-faint);
+}
+
+.trace summary {
+  cursor: pointer;
+}
+
+.trace-ok,
+.trace-err {
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.trace-err {
+  color: var(--danger);
+}
+
+.chat-intro {
+  color: var(--fg-muted);
+  font: 400 var(--t-base) / 1.6 var(--font);
+  text-wrap: pretty;
+}
+
+.suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  margin-top: var(--s6);
+}
+
+.suggestion {
+  padding: 11px var(--s5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--fg);
+  font: 400 var(--t-base) / 1.4 var(--font);
+  text-align: left;
+  cursor: pointer;
+}
+
+.suggestion:hover {
+  border-color: var(--accent);
+}
+
+.composer-wrap {
+  flex: none;
+  padding: var(--s5) var(--s6) var(--s6);
+  border-top: 1px solid var(--line-soft);
+}
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s3);
+  padding: 9px 9px 9px var(--s5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.composer textarea {
+  flex: 1;
+  min-width: 0;
+  max-height: 120px;
+  padding: 3px 0;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: 400 var(--t-lg) / 1.4 var(--font);
+  resize: none;
+}
+
+.composer textarea:focus {
+  outline: none;
+}
+
+.composer textarea::placeholder {
+  color: var(--fg-placeholder);
+}
+
+.composer .btn {
+  padding: 7px var(--s6);
+  border-radius: var(--r-btn);
+}
+
+.composer-meta {
+  margin: var(--s3) 0 0;
+  font: 400 var(--t-xxs) / 1.4 var(--font);
+  color: var(--fg-tertiary);
+  text-align: center;
+}
+
+/* --- setup ---------------------------------------------------------------- */
+
+.setup {
+  gap: var(--s6);
+}
+
+.schoolpicker {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: var(--s4) var(--s5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.swatch {
+  display: flex;
+  gap: 3px;
+  flex: none;
+}
+
+.swatch-a,
+.swatch-b {
+  width: 9px;
+  height: 14px;
+  border-radius: 2px;
+}
+
+.schoolpicker-select {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  color: var(--fg);
+  font: 400 var(--t-base) / 1.4 var(--font);
+  cursor: pointer;
+}
+
+.schoolpicker-select:focus {
+  outline: none;
+}
+
+.grant {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  align-items: flex-start;
+  padding: var(--s5);
+  border: 1px solid var(--warn);
+  border-radius: var(--r-lg);
+  background: var(--warn-soft);
+}
+
+.runner {
+  padding: var(--s4) var(--s5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.runner summary {
+  cursor: pointer;
+  font: 400 var(--t-md) / 1.4 var(--font);
+  color: var(--fg-muted);
+}
+
+.runner > *:not(summary) {
+  margin-top: var(--s3);
+}
+
+.runner-out {
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--s3);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font: 400 var(--t-xxs) / 1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

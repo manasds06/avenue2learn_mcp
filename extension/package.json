@@ -14,12 +14,15 @@
   },
   "devDependencies": {
     "@huggingface/transformers": "^4.2.0",
+    "@testing-library/preact": "^3.2.4",
     "@types/chrome": "^0.0.270",
     "@types/node": "^26.2.0",
     "esbuild": "^0.24.0",
     "fake-indexeddb": "^6.2.5",
+    "jsdom": "^29.1.1",
     "jszip": "^3.10.1",
     "pdfjs-dist": "^6.2.108",
+    "preact": "^10.29.8",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
   }

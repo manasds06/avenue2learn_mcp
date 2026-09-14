@@ -246,7 +246,8 @@ export const TOOLS: ToolDef[] = [
       "Semantic + keyword search across the user's INDEXED course files — outlines, slide decks, assignment specs, readings. Returns matching passages WITH CITATIONS (course, file, page or slide). Read-only. " +
       "This is the right tool for any question whose answer is INSIDE a course file: 'what's the late penalty?', 'what are the assignment weights?', 'which lecture covered red-black trees?'. " +
       "Prefer it over read_content_file when you do not already know which file holds the answer — it searches everything at once instead of opening files one by one. " +
-      "Requires sync_course_materials to have run for that course. If indexed_courses is empty, NOTHING has been indexed: say so, and do not conclude the material fails to mention what was asked.",
+      "Requires sync_course_materials to have run for that course. If indexed_courses is empty, NOTHING has been indexed: say so, and do not conclude the material fails to mention what was asked. " +
+      "RESULTS ARE EXCERPTS, NOT WHOLE FILES. documents_matched lists which files these passages came from and how many pages each has. If the results identify the right file but not the passage asked for, call read_content_file on that topic_id — do NOT report that the content could not be found when only part of the file was searched.",
     parameters: {
       type: "object",
       properties: {

@@ -24,8 +24,9 @@ import { avenue } from "../avenue/client.js";
 import { AvenueError } from "../avenue/errors.js";
 import { addDays, describe, nowUtc, parseD2L, toUtcIso } from "../avenue/dates.js";
 import { asFloat, asInt, isObj, pick, richText, toText, truncate } from "../avenue/models.js";
+import { COURSE_CONCURRENCY, DETAIL_CONCURRENCY, mapPool } from "../avenue/pool.js";
 import { listAnnouncements } from "./announcements.js";
-import { getUpcomingDeadlines } from "./assignments.js";
+import { calendarEvents } from "./calendar.js";
 import { getCourseContent } from "./content.js";
 import { listCourses } from "./courses.js";
 import { getGrades } from "./grades.js";
@@ -34,6 +35,8 @@ const CATEGORIES = ["announcements", "files", "grades", "deadlines"] as const;
 type Category = (typeof CATEGORIES)[number];
 
 const DEFAULT_LOOKBACK_DAYS = 7;
+/** How far ahead the "coming up" category looks. Matches the Python digest. */
+const UPCOMING_DAYS = 7;
 const SNIPPET = 400;
 
 const wmKey = (orgUnitId: number, category: Category) => `wm:${orgUnitId}:${category}`;
@@ -43,10 +46,6 @@ async function getWatermark(orgUnitId: number, category: Category): Promise<stri
   const stored = await chrome.storage.local.get(key);
   const value = stored[key];
   return typeof value === "string" ? value : null;
-}
-
-async function setWatermark(orgUnitId: number, category: Category, iso: string): Promise<void> {
-  await chrome.storage.local.set({ [wmKey(orgUnitId, category)]: iso });
 }
 
 interface Change {
@@ -96,11 +95,14 @@ export async function getWhatsNew(args: {
   const failures: Failure[] = [];
   const advanced: Array<{ org_unit_id: number; category: Category }> = [];
 
-  for (const course of courses) {
+  // Courses in parallel, and the four categories within a course in parallel —
+  // the shape asyncio.gather gives the Python version. Sequentially this was 84
+  // round trips nose to tail before Home could render anything.
+  await mapPool(courses, COURSE_CONCURRENCY, async (course) => {
     const oid = course.org_unit_id;
     const name = course.name;
 
-    for (const category of CATEGORIES) {
+    await mapPool(CATEGORIES, DETAIL_CONCURRENCY, async (category) => {
       const stored = override ? toUtcIso(override) : await getWatermark(oid, category);
       const cutoff = stored ? parseD2L(stored) : addDays(now, -DEFAULT_LOOKBACK_DAYS);
 
@@ -113,14 +115,33 @@ export async function getWhatsNew(args: {
           message: err instanceof AvenueError ? err.message : String(err).slice(0, 200),
         });
         // Watermark deliberately NOT advanced — see the header note.
-        continue;
+        return;
       }
 
-      if (markSeen) {
-        await setWatermark(oid, category, stamp);
-        advanced.push({ org_unit_id: oid, category });
-      }
-    }
+      // Recorded now, written in one batch below. A category that failed is
+      // still never in this list.
+      if (markSeen) advanced.push({ org_unit_id: oid, category });
+    });
+  });
+
+  if (markSeen && advanced.length) {
+    // One write instead of one per (course, category). storage.local.set is
+    // cheap but not free, and 84 of them serialized is a visible pause.
+    await chrome.storage.local.set(
+      Object.fromEntries(advanced.map((a) => [wmKey(a.org_unit_id, a.category), stamp])),
+    );
+  }
+
+  // Courses now finish out of order, so sort rather than let the order depend
+  // on which request came back first. Home shows the first five of each group;
+  // a different five on every reload reads as things appearing and vanishing.
+  for (const list of Object.values(changes)) {
+    list.sort(
+      (a, b) =>
+        (b.at?.utc ?? "").localeCompare(a.at?.utc ?? "") ||
+        a.course_name.localeCompare(b.course_name) ||
+        a.title.localeCompare(b.title),
+    );
   }
 
   const total = Object.values(changes).reduce((n, list) => n + list.length, 0);
@@ -224,16 +245,25 @@ async function collect(
     return;
   }
 
-  // deadlines: what has entered the window since last time
-  const { deadlines } = await getUpcomingDeadlines({ days_ahead: 14 });
-  for (const d of deadlines as Array<Record<string, unknown>>) {
-    if (d["org_unit_id"] !== oid) continue;
+  // deadlines: what is coming up for THIS course.
+  //
+  // This used to call getUpcomingDeadlines(), which sweeps EVERY course, and
+  // then threw away all but one course's rows — inside a loop over courses. So
+  // a 21-course digest ran the full 21-course sweep 21 times, sequentially,
+  // for roughly nine hundred requests where twenty-one would do. Home waits on
+  // this, which is why it took the better part of a minute to show anything.
+  //
+  // One course's calendar, like the Python version has always done.
+  const events = await calendarEvents(oid, { daysBack: 0, daysAhead: UPCOMING_DAYS });
+  const horizon = addDays(now, UPCOMING_DAYS);
+  for (const ev of events) {
+    if (ev.dueAt < now || ev.dueAt > horizon) continue;
     changes["upcoming"]!.push({
       course_name: name,
       org_unit_id: oid,
-      title: String(d["title"] ?? ""),
-      at: d["due_date"] as Change["at"],
-      detail: String(d["submission_status"] ?? ""),
+      title: ev.title,
+      at: ev.due_date,
+      detail: ev.kind,
     });
   }
 }

@@ -157,7 +157,7 @@ describe("model-supplied arguments are coerced before they reach a key lookup", 
     const root = new URL("..", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
     // Tools are split across the worker and the panel; coercing in only one
     // would leave the file tools — the ones that hit IndexedDB — unprotected.
-    for (const file of ["src/background/worker.ts", "src/ui/sidepanel.ts"]) {
+    for (const file of ["src/background/worker.ts", "src/ui/data/tools.ts"]) {
       expect(readFileSync(join(root, file), "utf8"), file).toContain("coerceArgs(tool, args)");
     }
   });
