@@ -111,7 +111,7 @@ class Syncer:
             topic_id = topic["topic_id"]
             name = topic.get("file_name") or topic.get("title") or f"topic {topic_id}"
 
-            if not extractor.is_supported(name):
+            if extractor.is_known_unsupported(name):
                 report["files_skipped_unsupported"] += 1
                 report["errors"].append(
                     {"file_name": name, "reason": "unsupported file type"}
@@ -224,7 +224,10 @@ class Syncer:
         info = await self.client.download(
             "le", f"{org_unit_id}/content/topics/{topic_id}/file", dest
         )
-        actual = Path(info["path"])
+        actual = extractor.ensure_suffix(
+            Path(info["path"]), info.get("filename"), info.get("mime_type")
+        )
+        name = actual.name
         digest = extractor.sha256_file(actual)
 
         # Secondary check: catches re-uploads that reset the timestamp without

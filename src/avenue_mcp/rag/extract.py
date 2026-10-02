@@ -57,8 +57,46 @@ class Extraction:
         return sum(len(s.text) for s in self.segments)
 
 
+UNSUPPORTED_SUFFIXES = {
+    ".mp4", ".mov", ".zip", ".png", ".jpg", ".jpeg", ".xlsx", ".ppt", ".doc",
+}
+
+_MIME_SUFFIXES = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "text/plain": ".txt",
+    "text/markdown": ".md",
+    "text/csv": ".csv",
+    "text/html": ".html",
+}
+
+
 def is_supported(path: Path | str) -> bool:
     return Path(path).suffix.lower() in SUPPORTED_SUFFIXES
+
+
+def is_known_unsupported(name: str) -> bool:
+    return Path(name).suffix.lower() in UNSUPPORTED_SUFFIXES
+
+
+def ensure_suffix(path: Path, filename: str | None, mime_type: str | None) -> Path:
+    """Rename a downloaded file so it carries its real extension.
+
+    Avenue names file topics by title ("intro", "Tutorial1"), with no extension
+    and no MIME type in the content tree; the real type only shows up in the
+    download response. Renames in place and returns the new path.
+    """
+    if is_supported(path):
+        return path
+    suffix = ""
+    if filename and is_supported(filename):
+        suffix = Path(filename).suffix.lower()
+    elif mime_type:
+        suffix = _MIME_SUFFIXES.get(mime_type.split(";")[0].strip().lower(), "")
+    if not suffix:
+        return path
+    return path.replace(path.with_name(path.name + suffix))
 
 
 def sha256_file(path: Path) -> str:
@@ -77,11 +115,7 @@ def extract(path: Path | str, mime_type: str | None = None) -> Extraction:
 
     suffix = p.suffix.lower()
     if not suffix and mime_type:
-        suffix = {
-            "application/pdf": ".pdf",
-            "text/plain": ".txt",
-            "text/html": ".html",
-        }.get(mime_type.split(";")[0].strip(), "")
+        suffix = _MIME_SUFFIXES.get(mime_type.split(";")[0].strip().lower(), "")
 
     try:
         if suffix == ".pdf":

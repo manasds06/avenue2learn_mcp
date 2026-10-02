@@ -168,7 +168,9 @@ async def read_content_file(
     info = await ctx.client.download(
         "le", f"{org_unit_id}/content/topics/{topic_id}/file", dest
     )
-    path = Path(info["path"])
+    path = extractor.ensure_suffix(
+        Path(info["path"]), info.get("filename"), info.get("mime_type")
+    )
     actual_name = info.get("filename") or file_name or path.name
 
     if not extractor.is_supported(path) and not extractor.is_supported(actual_name):
